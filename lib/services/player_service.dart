@@ -1,36 +1,54 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:sweatdex/models/player.dart';
+import 'offline_cache_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// player_service.dart
+// player_service.dart  (AOD v1.3)
 //
 // All Supabase database interactions for players, teams, coaches, game rosters,
 // and player-account linking.
 //
-// BUG FIX (Issue 1 / 42501): createTeam() now calls the Supabase RPC
-//   `create_team` (SECURITY DEFINER function defined in migration_v2.sql).
-//   The function runs as postgres, bypassing RLS entirely, so the teams INSERT
-//   and team_coaches INSERT happen atomically without the chicken-and-egg
-//   problem of `is_team_member()` evaluating before the membership row exists.
+// CHANGES (v1.3):
 //
-// NEW: getGameRosters(), createGameRoster(), updateGameRosterLineup(),
-//   deleteGameRoster() — persist game rosters to Supabase instead of memory.
+//   NEW — getGameRosterById():
+//     Fetches a single game_roster row by ID so GameRosterScreen can restore
+//     previously saved starters/substitutes when a roster is opened.
 //
-// NEW: getPlayerLinkedTeams() — returns teams where the current auth account
-//   is linked as a player via the player_accounts table.
+//   NEW — getGameRosterStream():
+//     Returns a Supabase realtime stream for game_rosters on a team.  Used by
+//     SavedRosterScreen to receive live updates without polling.
+//     NOTE: The Supabase Flutter .stream() API does NOT support complex filters
+//     (verified github.com/supabase/supabase-flutter #451/#954). The stream
+//     returns ALL game_rosters the authenticated user can see; client-side
+//     filtering by team_id is applied in the .map() call.  This is acceptable
+//     because RLS already limits the result set to the coach's teams.
 //
-// BUG FIX (Bug 3): createTeam() previously used a name+sport+timestamp query
-//   to retrieve the new team ID, which could return the wrong row if two coaches
-//   simultaneously created identically-named teams. The RPC approach eliminates
-//   this race entirely by returning the ID from the function directly.
+//   NEW — linkPlayerToAccount():
+//     Calls the `link_player_to_account` SECURITY DEFINER RPC to retroactively
+//     associate an existing player row with a user account by email.
 //
-// BUG FIX (Bug 9): removeCoachFromTeam() uses a single join query rather than
-//   two sequential round-trips to check ownership.
+//   NEW — getMyPlayerOnTeam():
+//     Returns the Player row for the currently logged-in account on a team,
+//     via the player_accounts join.  Used by PlayerSelfViewScreen.
+//
+//   CHANGE — getPlayers() and getGameRosters():
+//     Now wrap Supabase calls with offline cache fallback using
+//     OfflineCacheService.  On network failure, stale data is returned
+//     with a warning.  On success, the cache is updated.
+//
+// EXISTING fixes retained from v1.2:
+//   BUG FIX (Issue 1 / 42501): createTeam() calls `create_team` RPC.
+//   BUG FIX (Bug 3): RPC eliminates race condition in team ID retrieval.
+//   BUG FIX (Bug 9): removeCoachFromTeam() uses a single join query.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class PlayerService {
   final _supabase = Supabase.instance.client;
+
+  // Offline cache service — lazily initialised.
+  final _cache = OfflineCacheService();
 
   // ===========================================================================
   // PLAYER OPERATIONS
@@ -47,6 +65,10 @@ class PlayerService {
   }
 
   /// Fetches all players for [teamId], ordered by name.
+  ///
+  /// CHANGE (v1.3): Offline cache fallback.  On SocketException or other
+  /// network errors, returns the last known player list from local cache
+  /// rather than crashing the screen.
   Future<List<Player>> getPlayers(String teamId) async {
     try {
       final response = await _supabase
@@ -54,14 +76,38 @@ class PlayerService {
           .select()
           .eq('team_id', teamId)
           .order('name', ascending: true);
-      return (response as List).map((d) => Player.fromMap(d)).toList();
+
+      final players =
+          (response as List).map((d) => Player.fromMap(d)).toList();
+
+      // Update cache with fresh data.
+      await _cache.writeList(
+        OfflineCacheService.playersKey(teamId),
+        players.map((p) => p.toMap()..['id'] = p.id).toList(),
+      );
+
+      return players;
     } catch (e) {
-      debugPrint('Error fetching players: $e');
+      debugPrint('Error fetching players — checking cache: $e');
+
+      // Offline fallback: return cached data if network is unavailable.
+      if (e is SocketException || e.toString().contains('network')) {
+        final cached = await _cache.readList(
+          OfflineCacheService.playersKey(teamId),
+        );
+        if (cached != null) {
+          debugPrint('Using cached players for team $teamId');
+          return cached.map((d) => Player.fromMap(d)).toList();
+        }
+      }
+
       throw Exception('Error fetching players: $e');
     }
   }
 
   /// Real-time stream of players for [teamId].
+  /// This stream is always live — the offline fallback only applies to the
+  /// one-shot getPlayers() call above.
   Stream<List<Player>> getPlayerStream(String teamId) {
     return _supabase
         .from('players')
@@ -144,6 +190,52 @@ class PlayerService {
     }
   }
 
+  // ── NEW (v1.3) ─────────────────────────────────────────────────────────────
+
+  /// Returns the Player row linked to the current auth account on [teamId]
+  /// via the player_accounts join table.  Returns null if no link exists.
+  ///
+  /// Used by PlayerSelfViewScreen.
+  Future<Player?> getMyPlayerOnTeam(String teamId) async {
+    try {
+      final user = _supabase.auth.currentUser;
+      if (user == null) return null;
+
+      // Look up the player_accounts row for this user + team.
+      // player_accounts.coach_id is the coaches.id of the user's account.
+      final coach = await _supabase
+          .from('coaches')
+          .select('id')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+      if (coach == null) return null;
+
+      final link = await _supabase
+          .from('player_accounts')
+          .select('player_id')
+          .eq('coach_id', coach['id'] as String)
+          .eq('team_id', teamId)
+          .maybeSingle();
+
+      if (link == null) return null;
+
+      // Fetch the full player row.
+      final playerRow = await _supabase
+          .from('players')
+          .select()
+          .eq('id', link['player_id'] as String)
+          .maybeSingle();
+
+      if (playerRow == null) return null;
+
+      return Player.fromMap(playerRow);
+    } catch (e) {
+      debugPrint('Error fetching my player: $e');
+      return null;
+    }
+  }
+
   // ===========================================================================
   // TEAM OPERATIONS
   // ===========================================================================
@@ -183,11 +275,7 @@ class PlayerService {
     }
   }
 
-  /// Returns teams where the current account is linked as a player
-  /// (via player_accounts). These show up with is_player: true in the UI.
-  ///
-  /// NEW (Notes.txt): "The player's team will show up with an icon showing
-  /// that they are a player and not a coach."
+  /// Returns teams where the current account is linked as a player.
   Future<List<Map<String, dynamic>>> getPlayerLinkedTeams() async {
     try {
       final user = _supabase.auth.currentUser;
@@ -203,7 +291,6 @@ class PlayerService {
 
       final coachId = coach['id'];
 
-      // Fetch player_accounts rows for this coach, joining the teams table.
       final response = await _supabase
           .from('player_accounts')
           .select('team_id, is_player, teams(id, team_name, sport, created_at)')
@@ -222,7 +309,6 @@ class PlayerService {
         };
       }).toList();
     } catch (e) {
-      // Non-fatal: player_accounts may not exist yet.
       debugPrint('Error fetching player-linked teams: $e');
       return [];
     }
@@ -230,34 +316,16 @@ class PlayerService {
 
   // ── BUG FIX (Issue 1 / 42501) ─────────────────────────────────────────────
   //
-  // ROOT CAUSE: The `teams` INSERT policy WITH CHECK calls
-  //   get_current_coach_id(). If the coaches row doesn't exist yet (auth
-  //   trigger race on fresh sign-up), the function returns NULL, the policy
-  //   evaluates to false, and the INSERT fails with 42501.
+  // createTeam() uses the `create_team` SECURITY DEFINER RPC, which bypasses
+  // RLS and atomically inserts into teams + team_coaches.
   //
-  //   Additionally, even chaining .select('id') to .insert() can trigger the
-  //   SELECT policy (is_team_member) before team_coaches is populated,
-  //   causing a second 42501.
-  //
-  // FIX: Call the `create_team` SECURITY DEFINER RPC (defined in
-  //   migration_v2.sql). The function runs as postgres, bypasses RLS
-  //   entirely, inserts both the team and team_coaches row atomically,
-  //   and returns the new team ID. No race condition is possible.
-  //
-  // ─────────────────────────────────────────────────────────────────────────
-
   /// Creates a new team by calling the `create_team` Supabase RPC.
-  /// The RPC is a SECURITY DEFINER function that bypasses RLS and atomically
-  /// inserts into `teams` and `team_coaches` in one transaction.
   Future<void> createTeam(String teamName, String sport) async {
     try {
       final user = _supabase.auth.currentUser;
       if (user == null) {
         throw Exception('You must be logged in to create a team.');
       }
-
-      // Call the SECURITY DEFINER RPC. This bypasses all RLS policies,
-      // eliminating the 42501 error from `is_team_member` / `get_current_coach_id`.
       await _supabase.rpc('create_team', params: {
         'p_team_name': teamName,
         'p_sport': sport,
@@ -268,7 +336,7 @@ class PlayerService {
     }
   }
 
-  /// Updates team name and sport. Any coach on the team may update.
+  /// Updates team name and sport.
   Future<void> updateTeam(
       String teamId, String teamName, String sport) async {
     try {
@@ -355,12 +423,10 @@ class PlayerService {
   // ===========================================================================
   // GAME ROSTER OPERATIONS
   // ===========================================================================
-  //
-  // These methods persist game rosters to the Supabase `game_rosters` table
-  // (defined in migration_v2.sql). Previously rosters were stored in-memory
-  // only and were lost on app restart.
 
   /// Returns all saved game rosters for [teamId], newest first.
+  ///
+  /// CHANGE (v1.3): Offline cache fallback — same pattern as getPlayers().
   Future<List<Map<String, dynamic>>> getGameRosters(String teamId) async {
     try {
       final response = await _supabase
@@ -368,11 +434,65 @@ class PlayerService {
           .select()
           .eq('team_id', teamId)
           .order('created_at', ascending: false);
-      return (response as List).cast<Map<String, dynamic>>();
+
+      final rows = (response as List).cast<Map<String, dynamic>>();
+
+      // Update cache.
+      await _cache.writeList(
+          OfflineCacheService.gameRostersKey(teamId), rows);
+
+      return rows;
     } catch (e) {
-      debugPrint('Error fetching game rosters: $e');
+      debugPrint('Error fetching game rosters — checking cache: $e');
+
+      if (e is SocketException || e.toString().contains('network')) {
+        final cached = await _cache.readList(
+          OfflineCacheService.gameRostersKey(teamId),
+        );
+        if (cached != null) {
+          debugPrint('Using cached game_rosters for team $teamId');
+          return cached;
+        }
+      }
+
       throw Exception('Error fetching game rosters: $e');
     }
+  }
+
+  // ── NEW (v1.3) ─────────────────────────────────────────────────────────────
+
+  /// Returns a single game_roster row by [rosterId], or null if not found.
+  /// Used by GameRosterScreen to restore saved starter/sub positions.
+  Future<Map<String, dynamic>?> getGameRosterById(String rosterId) async {
+    try {
+      return await _supabase
+          .from('game_rosters')
+          .select()
+          .eq('id', rosterId)
+          .maybeSingle();
+    } catch (e) {
+      debugPrint('Error fetching game roster by id: $e');
+      return null;
+    }
+  }
+
+  /// Returns a Supabase Realtime stream of game_rosters.
+  ///
+  /// CHANGE (v1.3): Used by SavedRosterScreen instead of a one-shot Future.
+  ///
+  /// NOTE: Supabase Flutter .stream() does not support complex WHERE filters
+  /// reliably (see github.com/supabase/supabase-flutter #451, #954).
+  /// The stream is filtered by team_id on the client side in the .map() call.
+  /// RLS ensures only rows the authenticated user can access are returned.
+  Stream<List<Map<String, dynamic>>> getGameRosterStream(String teamId) {
+    return _supabase
+        .from('game_rosters')
+        .stream(primaryKey: ['id'])
+        .order('created_at', ascending: false)
+        .map((rows) => rows
+            .where((r) => r['team_id'] == teamId)
+            .cast<Map<String, dynamic>>()
+            .toList());
   }
 
   /// Inserts a new game roster row and returns the generated UUID.
@@ -392,8 +512,6 @@ class PlayerService {
               .maybeSingle()
           : null;
 
-      // Use .insert().select('id').single() — RETURNING does NOT evaluate
-      // the SELECT RLS policy (is_team_member), only the INSERT policy.
       final result = await _supabase
           .from('game_rosters')
           .insert({
@@ -526,6 +644,46 @@ class PlayerService {
     }
   }
 
+  // ── NEW (v1.3): RPC for add_player_account ─────────────────────────────────
+
+  /// Retroactively links an existing [playerId] on [teamId] to a user account
+  /// identified by [playerEmail].
+  ///
+  /// Calls the `link_player_to_account` SECURITY DEFINER Postgres RPC
+  /// (defined in add_player_account_rpc.sql).  The function:
+  ///   1. Looks up the auth.users row by email.
+  ///   2. Finds the corresponding coaches row (created by the sign-up trigger).
+  ///   3. Upserts a player_accounts row linking player → coach account.
+  ///
+  /// Throws an Exception with a human-readable message on failure.
+  Future<void> linkPlayerToAccount({
+    required String teamId,
+    required String playerId,
+    required String playerEmail,
+  }) async {
+    try {
+      await _supabase.rpc('link_player_to_account', params: {
+        'p_team_id': teamId,
+        'p_player_id': playerId,
+        'p_player_email': playerEmail,
+      });
+    } catch (e) {
+      debugPrint('Error linking player to account: $e');
+      // Surface a clean message — the RPC raises user-facing errors via
+      // RAISE EXCEPTION which Supabase wraps in a PostgrestException.
+      final msg = e.toString();
+      if (msg.contains('No user found')) {
+        throw Exception(
+            'No account found for $playerEmail. The player must sign up first.');
+      } else if (msg.contains('No player found')) {
+        throw Exception('Player not found on this team.');
+      }
+      throw Exception('Error linking player: $e');
+    }
+  }
+
+  // ── End new ────────────────────────────────────────────────────────────────
+
   /// Removes [coachId] from [teamId].
   ///
   /// BUG FIX (Bug 9): Uses a single query to check ownership instead of
@@ -544,7 +702,6 @@ class PlayerService {
       final currentCoachId = currentCoach['id'];
       final isRemovingSelf = coachId == currentCoachId;
 
-      // Non-self removal: check ownership in a single query (Bug 9 fix).
       if (!isRemovingSelf) {
         final ownerRow = await _supabase
             .from('team_coaches')
@@ -558,7 +715,6 @@ class PlayerService {
         }
       }
 
-      // Guard against removing the sole owner.
       final coachToRemove = await _supabase
           .from('team_coaches')
           .select('is_owner')
@@ -609,14 +765,12 @@ class PlayerService {
 
       final currentCoachId = currentCoach['id'];
 
-      // Revoke current owner.
       await _supabase
           .from('team_coaches')
           .update({'is_owner': false})
           .eq('team_id', teamId)
           .eq('coach_id', currentCoachId);
 
-      // Grant to new owner.
       await _supabase
           .from('team_coaches')
           .update({'is_owner': true})

@@ -4,17 +4,26 @@ import 'package:sweatdex/models/player.dart';
 import '../services/player_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// game_roster_screen.dart
+// game_roster_screen.dart  (AOD v1.3)
 //
 // Builds a Starting Lineup and Substitutes bench by tapping or dragging
 // players from the full roster.
 //
-// CHANGE: Accepts an optional [rosterId] parameter. When provided, the
-//   "Save Roster" action persists starters and subs to the Supabase
-//   game_rosters table instead of just showing a summary dialog.
+// CHANGE (Notes.txt v1.3): TabBar labelColor and unselectedLabelColor set to
+//   Colors.white so that tab text/icons always appear white regardless of the
+//   AppBar's default Material-3 surface-tint colour calculation.
+//   Both the selected-label colour AND the unselected-label colour are set to
+//   white; a reduced opacity is applied to unselected labels via
+//   unselectedLabelColor so the active tab still looks distinct.
+//
+// CHANGE (Notes.txt v1.3): When [rosterId] is provided, _loadPlayers() now
+//   also fetches the previously saved starters/substitutes from Supabase via
+//   PlayerService.getGameRosterById() and pre-populates the lists.  This means
+//   positions that were saved on another device will be restored when the
+//   coach reopens a roster.
 //
 // CHANGE (Notes.txt): Clipboard icon (Icons.assignment) replaces
-//   Icons.sports_score wherever appropriate.
+//   Icons.sports_score throughout.
 //
 // BUG FIX (Bug 7): _showSlotDialog() defers TextEditingController.dispose()
 //   to the next frame via addPostFrameCallback to avoid use-after-dispose
@@ -27,7 +36,7 @@ class GameRosterScreen extends StatefulWidget {
   final String? rosterTitle;
   final String? gameDate;
   final int starterSlots;
-  final String? rosterId;   // Supabase game_rosters.id — null = unsaved
+  final String? rosterId; // Supabase game_rosters.id — null = unsaved
 
   /// Optional cancel callback shown as a bottom button.
   /// null = hidden; user uses the AppBar back arrow.
@@ -76,9 +85,47 @@ class _GameRosterScreenState extends State<GameRosterScreen>
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
+  /// Loads the full player list for this team, then — if a [rosterId] was
+  /// provided — restores previously saved starter/sub positions from Supabase.
   Future<void> _loadPlayers() async {
     try {
+      // Step 1: Fetch all players for this team.
       final players = await _playerService.getPlayers(widget.teamId);
+
+      // Step 2: If we have a saved roster, restore its lineup.
+      if (widget.rosterId != null) {
+        final rosterData =
+            await _playerService.getGameRosterById(widget.rosterId!);
+        if (rosterData != null) {
+          // rosterData['starters'] and ['substitutes'] are List<Map> with
+          // {player_id, slot_number}.  Map them back to Player objects,
+          // preserving slot_number ordering.
+          final starterIds = _extractOrderedIds(rosterData['starters']);
+          final subIds = _extractOrderedIds(rosterData['substitutes']);
+
+          final playerMap = {for (final p in players) p.id: p};
+
+          final savedStarters = starterIds
+              .where((id) => playerMap.containsKey(id))
+              .map((id) => playerMap[id]!)
+              .toList();
+
+          final savedSubs = subIds
+              .where((id) => playerMap.containsKey(id))
+              .map((id) => playerMap[id]!)
+              .toList();
+
+          setState(() {
+            _allPlayers = players;
+            _starters = savedStarters;
+            _substitutes = savedSubs;
+            _loading = false;
+          });
+          return;
+        }
+      }
+
+      // No saved roster — start with empty starters/subs.
       setState(() {
         _allPlayers = players;
         _loading = false;
@@ -91,6 +138,20 @@ class _GameRosterScreenState extends State<GameRosterScreen>
         );
       }
     }
+  }
+
+  /// Extracts player IDs in slot_number order from a JSON list.
+  /// Handles both List<Map> (JSONB from Supabase) and null gracefully.
+  List<String> _extractOrderedIds(dynamic raw) {
+    if (raw == null) return [];
+    final list = raw as List;
+    final sorted = List<Map<String, dynamic>>.from(list)
+      ..sort((a, b) =>
+          ((a['slot_number'] ?? 0) as int).compareTo((b['slot_number'] ?? 0) as int));
+    return sorted
+        .map((m) => (m['player_id'] ?? '') as String)
+        .where((id) => id.isNotEmpty)
+        .toList();
   }
 
   // ── Available players ─────────────────────────────────────────────────────
@@ -109,7 +170,8 @@ class _GameRosterScreenState extends State<GameRosterScreen>
     if (_starters.length >= _starterSlots) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Lineup full ($_starterSlots spots). Adjust or bench a starter.'),
+          content: Text(
+              'Lineup full ($_starterSlots spots). Adjust or bench a starter.'),
           action: SnackBarAction(label: 'Adjust', onPressed: _showSlotDialog),
         ),
       );
@@ -128,18 +190,28 @@ class _GameRosterScreenState extends State<GameRosterScreen>
           const SnackBar(content: Text('Starting lineup is full.')));
       return;
     }
-    setState(() { _substitutes.remove(player); _starters.add(player); });
+    setState(() {
+      _substitutes.remove(player);
+      _starters.add(player);
+    });
   }
 
   void _demoteStarterToSub(Player player) {
-    setState(() { _starters.remove(player); _substitutes.add(player); });
+    setState(() {
+      _starters.remove(player);
+      _substitutes.add(player);
+    });
   }
 
-  void _clearAll() => setState(() { _starters.clear(); _substitutes.clear(); });
+  void _clearAll() => setState(() {
+        _starters.clear();
+        _substitutes.clear();
+      });
 
   // ── Slot-count dialog ─────────────────────────────────────────────────────
 
-  /// BUG FIX (Bug 7): Dispose deferred to next frame.
+  /// BUG FIX (Bug 7): Dispose deferred to next frame to avoid
+  /// use-after-dispose when dialog is dismissed via barrier tap.
   Future<void> _showSlotDialog() async {
     int temp = _starterSlots;
     final controller = TextEditingController(text: '$temp');
@@ -162,7 +234,10 @@ class _GameRosterScreenState extends State<GameRosterScreen>
               children: [
                 IconButton(
                   onPressed: temp > 1
-                      ? () => setLocal(() { temp--; controller.text = '$temp'; })
+                      ? () => setLocal(() {
+                            temp--;
+                            controller.text = '$temp';
+                          })
                       : null,
                   icon: const Icon(Icons.remove_circle_outline),
                 ),
@@ -185,7 +260,10 @@ class _GameRosterScreenState extends State<GameRosterScreen>
                 ),
                 IconButton(
                   onPressed: temp < 50
-                      ? () => setLocal(() { temp++; controller.text = '$temp'; })
+                      ? () => setLocal(() {
+                            temp++;
+                            controller.text = '$temp';
+                          })
                       : null,
                   icon: const Icon(Icons.add_circle_outline),
                 ),
@@ -211,15 +289,16 @@ class _GameRosterScreenState extends State<GameRosterScreen>
       ),
     );
 
-    // BUG FIX (Bug 7): Defer disposal to the next frame.
+    // BUG FIX (Bug 7): Defer disposal so the animation frame that runs
+    // immediately after dialog close doesn't fire on a disposed controller.
     WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
   }
 
   // ── Save roster ───────────────────────────────────────────────────────────
 
   /// Persists starters and subs to the Supabase game_rosters table.
-  /// If [rosterId] is provided (roster was created from SavedRosterScreen),
-  /// updates the existing row. Otherwise shows a summary dialog.
+  /// If [rosterId] is provided, updates the existing row; otherwise shows
+  /// a summary dialog (no Supabase ID means the roster was never persisted).
   Future<void> _saveRoster() async {
     if (widget.rosterId != null) {
       try {
@@ -293,8 +372,7 @@ class _GameRosterScreenState extends State<GameRosterScreen>
           children: [
             Text(
               displayTitle,
-              style: const TextStyle(
-                  fontSize: 15, fontWeight: FontWeight.bold),
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -304,8 +382,7 @@ class _GameRosterScreenState extends State<GameRosterScreen>
                       fontSize: 11, fontWeight: FontWeight.normal))
             else
               const Text('Game Roster Builder',
-                  style: TextStyle(
-                      fontSize: 11, fontWeight: FontWeight.normal)),
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.normal)),
           ],
         ),
         actions: [
@@ -349,8 +426,17 @@ class _GameRosterScreenState extends State<GameRosterScreen>
             onPressed: _starters.isEmpty ? null : _saveRoster,
           ),
         ],
+        // ── CHANGE (Notes.txt v1.3): White tab font colors ─────────────────
+        // The AppBar background is deep blue (_brandBlue). Without explicit
+        // labelColor, Material 3 picks ColorScheme.primary (#1A3A6B) for the
+        // selected label — invisible on blue.  Setting both to white ensures
+        // readability.  Unselected tabs use 70% opacity white so they still
+        // feel visually distinct from the active tab.
         bottom: TabBar(
           controller: _tabController,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white.withValues(alpha: 0.7),
+          indicatorColor: Colors.white,
           tabs: [
             Tab(
               child: Row(
@@ -676,7 +762,7 @@ class _DraggablePlayerCard extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _StarterDropZone — reorderable starters list
+// _StarterDropZone — reorderable starters list with drag-target overlay
 // ─────────────────────────────────────────────────────────────────────────────
 class _StarterDropZone extends StatelessWidget {
   final List<Player> starters;
@@ -775,7 +861,7 @@ class _StarterDropZone extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _SubsDropZone — reorderable bench list
+// _SubsDropZone — reorderable bench list with drag-target overlay
 // ─────────────────────────────────────────────────────────────────────────────
 class _SubsDropZone extends StatelessWidget {
   final List<Player> substitutes;
@@ -906,12 +992,12 @@ class _RosterRowTile extends StatelessWidget {
           ),
         ],
       ),
-      title: Text(player.name,
-          style: const TextStyle(fontWeight: FontWeight.w500)),
+      title:
+          Text(player.name, style: const TextStyle(fontWeight: FontWeight.w500)),
       subtitle: player.nickname != null
           ? Text('"${player.nickname}"',
-              style: const TextStyle(
-                  fontStyle: FontStyle.italic, fontSize: 12))
+              style:
+                  const TextStyle(fontStyle: FontStyle.italic, fontSize: 12))
           : null,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,

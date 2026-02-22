@@ -128,6 +128,15 @@
   {
     "schemaname": "public",
     "tablename": "players",
+    "policyname": "players_select_own_linked",
+    "roles": "{public}",
+    "operation": "SELECT",
+    "using_expression": "(id IN ( SELECT pa.player_id\n   FROM player_accounts pa\n  WHERE (pa.coach_id = get_current_coach_id())))",
+    "check_expression": null
+  },
+  {
+    "schemaname": "public",
+    "tablename": "players",
     "policyname": "players_update",
     "roles": "{public}",
     "operation": "UPDATE",

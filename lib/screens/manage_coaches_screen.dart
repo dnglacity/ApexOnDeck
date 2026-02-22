@@ -1,13 +1,23 @@
 import 'package:flutter/material.dart';
 import '../services/player_service.dart';
 
-/// ManageCoachesScreen — view and manage all coaches on a team.
-///
-/// BUG FIX (Bug 8): When a coach removes themselves, the previous code only
-/// called `Navigator.of(context).pop()`, which returned to RosterScreen.
-/// RosterScreen then continued trying to stream players for a team the coach
-/// no longer has access to, causing RLS errors.
-/// Fix: Pop all the way back to the root (TeamSelectionScreen) on self-removal.
+// ─────────────────────────────────────────────────────────────────────────────
+// manage_coaches_screen.dart  (AOD v1.3)
+//
+// ManageCoachesScreen — view and manage all coaches on a team.
+//
+// CHANGE (Notes.txt v1.3): RPC for add_player_account.
+//   A new "Link Player → Account" FAB action lets coaches retroactively link
+//   an existing player row to a user account by email.  This calls the
+//   Supabase RPC `link_player_to_account` (defined in add_player_account_rpc.sql).
+//   The RPC finds the auth.users row by email, resolves the coach ID, and
+//   upserts into player_accounts.  The coach does NOT need to know the
+//   user's coach ID — only their email.
+//
+// BUG FIX (Bug 8): When a coach removes themselves, popUntil(isFirst) is used
+//   so RosterScreen doesn't try to stream players for a team they left.
+// ─────────────────────────────────────────────────────────────────────────────
+
 class ManageCoachesScreen extends StatefulWidget {
   final String teamId;
   final String teamName;
@@ -26,8 +36,7 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
   final _playerService = PlayerService();
   late Future<List<Map<String, dynamic>>> _coachesFuture;
 
-  // The current user's coach ID — used to identify the "YOU" badge and
-  // self-removal vs. other-removal logic.
+  /// The current user's coach ID — used for "YOU" badge and self-removal logic.
   String? _currentCoachId;
 
   @override
@@ -39,21 +48,17 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
-  /// Fetches the current user's coach profile and caches their ID.
   Future<void> _loadCurrentCoach() async {
     try {
       final coach = await _playerService.getCurrentCoach();
       if (mounted) {
-        setState(() {
-          _currentCoachId = coach?['id'];
-        });
+        setState(() => _currentCoachId = coach?['id']);
       }
     } catch (e) {
       debugPrint('Error loading current coach: $e');
     }
   }
 
-  /// Re-fetches the team's coach list and triggers a rebuild.
   void _refreshCoaches() {
     setState(() {
       _coachesFuture = _playerService.getTeamCoaches(widget.teamId);
@@ -64,7 +69,8 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
 
   Future<void> _showAddCoachDialog() async {
     final emailController = TextEditingController();
-    final roleController = TextEditingController(text: 'Assistant Coach');
+    final roleController =
+        TextEditingController(text: 'Assistant Coach');
     final formKey = GlobalKey<FormState>();
 
     final result = await showDialog<bool>(
@@ -81,7 +87,8 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                 controller: emailController,
                 keyboardType: TextInputType.emailAddress,
                 textInputAction: TextInputAction.next,
-                onFieldSubmitted: (_) => FocusScope.of(context).nextFocus(),
+                onFieldSubmitted: (_) =>
+                    FocusScope.of(context).nextFocus(),
                 decoration: const InputDecoration(
                   labelText: 'Coach Email',
                   hintText: 'coach@example.com',
@@ -164,17 +171,166 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
     roleController.dispose();
   }
 
+  // ── Link player to account dialog ─────────────────────────────────────────
+  //
+  // NEW (Notes.txt v1.3): RPC for add_player_account.
+  // Allows a coach to retroactively link an existing player row to a user
+  // account by entering the player's email.  The `link_player_to_account`
+  // SECURITY DEFINER RPC handles the lookup and upsert atomically.
+
+  Future<void> _showLinkPlayerDialog() async {
+    // Step 1: Fetch all players on this team so the coach can pick one.
+    List<Map<String, dynamic>> players = [];
+    try {
+      final rawPlayers = await _playerService.getPlayers(widget.teamId);
+      players = rawPlayers
+          .map((p) => {'id': p.id, 'name': p.name, 'jersey': p.jerseyNumber})
+          .toList();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading players: $e')),
+        );
+      }
+      return;
+    }
+
+    if (players.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('No players on this team to link.')),
+        );
+      }
+      return;
+    }
+
+    final emailController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    String? selectedPlayerId;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Link Player → Account'),
+          content: Form(
+            key: formKey,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Explanatory text.
+                  Text(
+                    'Enter the player\'s registered email and select '
+                    'their roster entry.  They will be able to see '
+                    'their team view after signing in.',
+                    style: Theme.of(ctx).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Player picker.
+                  DropdownButtonFormField<String>(
+                    value: selectedPlayerId,
+                    decoration: const InputDecoration(
+                      labelText: 'Select Player',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.person),
+                    ),
+                    items: players
+                        .map((p) => DropdownMenuItem<String>(
+                              value: p['id'] as String,
+                              child: Text(
+                                  '${p['name']}${p['jersey'] != null ? ' (#${p['jersey']})' : ''}'),
+                            ))
+                        .toList(),
+                    onChanged: (v) => setLocal(() => selectedPlayerId = v),
+                    validator: (_) => selectedPlayerId == null
+                        ? 'Please select a player'
+                        : null,
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Account email.
+                  TextFormField(
+                    controller: emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    textInputAction: TextInputAction.done,
+                    decoration: const InputDecoration(
+                      labelText: 'Player\'s Account Email',
+                      hintText: 'player@example.com',
+                      prefixIcon: Icon(Icons.email_outlined),
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) {
+                      if (v == null || v.trim().isEmpty) {
+                        return 'Please enter an email';
+                      }
+                      if (!v.contains('@')) {
+                        return 'Please enter a valid email';
+                      }
+                      return null;
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (formKey.currentState!.validate()) {
+                  Navigator.pop(ctx, true);
+                }
+              },
+              child: const Text('Link'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    emailController.dispose();
+
+    if (result == true && selectedPlayerId != null && mounted) {
+      try {
+        // Call the SECURITY DEFINER RPC that looks up the auth user by
+        // email and upserts the player_accounts row.
+        await _playerService.linkPlayerToAccount(
+          teamId: widget.teamId,
+          playerId: selectedPlayerId!,
+          playerEmail: emailController.text.trim(),
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Player linked to account!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(e.toString().replaceAll('Exception: ', '')),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
   // ── Remove coach ──────────────────────────────────────────────────────────
 
-  /// Confirms removal of a coach, then removes them.
-  ///
-  /// BUG FIX (Bug 8): When the coach removes themselves, the old code called
-  /// `Navigator.of(context).pop()` once — landing back on RosterScreen, which
-  /// would then fail all Supabase queries because the user is no longer a
-  /// team member (RLS blocks everything).
-  ///
-  /// Fix: Use `popUntil((route) => route.isFirst)` to return all the way to
-  /// TeamSelectionScreen, which gracefully refreshes its team list.
+  /// BUG FIX (Bug 8): When the coach removes themselves, popUntil(isFirst)
+  /// is used so we don't land on RosterScreen — which would fire player-stream
+  /// queries that RLS now blocks because the user is no longer a team member.
   Future<void> _confirmRemoveCoach(Map<String, dynamic> coach) async {
     final isSelf = coach['id'] == _currentCoachId;
 
@@ -210,14 +366,10 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
 
         if (isSelf) {
           // FIX (Bug 8): Pop all the way back to TeamSelectionScreen.
-          // If we only popped once we'd land on RosterScreen, which would
-          // then fail all player-stream queries because RLS no longer
-          // recognises us as a team member.
           Navigator.of(context).popUntil((route) => route.isFirst);
           return;
         }
 
-        // Non-self removal: just refresh the coaches list.
         _refreshCoaches();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('${coach['name']} removed')),
@@ -239,7 +391,6 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
 
   Future<void> _showTransferOwnershipDialog(
       List<Map<String, dynamic>> coaches) async {
-    // Only non-owner coaches are eligible transfer targets.
     final eligibleCoaches =
         coaches.where((c) => c['is_owner'] != true).toList();
 
@@ -361,7 +512,6 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
 
           final coaches = snapshot.data ?? [];
 
-          // Determine if the current user is the team owner.
           final currentCoach = coaches.firstWhere(
             (c) => c['id'] == _currentCoachId,
             orElse: () => {},
@@ -371,7 +521,7 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
 
           return Column(
             children: [
-              // ── Role banner ───────────────────────────────────────────────
+              // ── Role banner ──────────────────────────────────────────────
               if (isCurrentUserOwner)
                 Card(
                   margin: const EdgeInsets.all(16),
@@ -386,13 +536,13 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                'You are the team owner',
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
+                              const Text('You are the team owner',
+                                  style:
+                                      TextStyle(fontWeight: FontWeight.bold)),
                               const SizedBox(height: 4),
                               Text(
-                                'You can manage coaches and transfer ownership',
+                                'You can manage coaches, transfer ownership, '
+                                'and link players to accounts.',
                                 style: TextStyle(
                                     fontSize: 12, color: Colors.grey[700]),
                               ),
@@ -422,13 +572,12 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                'You are a coach on this team',
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
+                              const Text('You are a coach on this team',
+                                  style:
+                                      TextStyle(fontWeight: FontWeight.bold)),
                               const SizedBox(height: 4),
                               Text(
-                                'You can add coaches or leave the team',
+                                'You can add coaches or leave the team.',
                                 style: TextStyle(
                                     fontSize: 12, color: Colors.grey[700]),
                               ),
@@ -440,7 +589,7 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                   ),
                 ),
 
-              // ── Coaches list ──────────────────────────────────────────────
+              // ── Coaches list ─────────────────────────────────────────────
               Expanded(
                 child: ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -459,17 +608,15 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                               : Colors.blue[100],
                           child: Icon(
                             isOwner ? Icons.shield : Icons.person,
-                            color: isOwner ? Colors.amber[700] : Colors.blue,
+                            color:
+                                isOwner ? Colors.amber[700] : Colors.blue,
                           ),
                         ),
                         title: Row(
                           children: [
-                            Text(
-                              coach['name'] as String,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            // "YOU" badge for the current user.
+                            Text(coach['name'] as String,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold)),
                             if (isCurrentUser) ...[
                               const SizedBox(width: 8),
                               Container(
@@ -479,17 +626,13 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                                   color: Colors.blue[100],
                                   borderRadius: BorderRadius.circular(12),
                                 ),
-                                child: Text(
-                                  'YOU',
-                                  style: TextStyle(
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.blue[900],
-                                  ),
-                                ),
+                                child: Text('YOU',
+                                    style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.blue[900])),
                               ),
                             ],
-                            // "OWNER" badge.
                             if (isOwner) ...[
                               const SizedBox(width: 8),
                               Container(
@@ -499,14 +642,11 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                                   color: Colors.amber[100],
                                   borderRadius: BorderRadius.circular(12),
                                 ),
-                                child: Text(
-                                  'OWNER',
-                                  style: TextStyle(
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.amber[900],
-                                  ),
-                                ),
+                                child: Text('OWNER',
+                                    style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.amber[900])),
                               ),
                             ],
                           ],
@@ -516,7 +656,7 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
                           children: [
                             Text(coach['role'] as String),
                             Text(
-                              coach['email'] as String,
+                              coach['email'] as String? ?? '',
                               style: TextStyle(
                                   fontSize: 12, color: Colors.grey[600]),
                             ),
@@ -537,29 +677,64 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
           );
         },
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddCoachDialog,
-        icon: const Icon(Icons.person_add),
-        label: const Text('Add Coach'),
+      // ── FAB: Add Coach OR Link Player (for owners) ────────────────────────
+      // CHANGE (v1.3): Owner gets a speed-dial style menu; non-owners keep
+      // the single "Add Coach" button.
+      floatingActionButton: _buildFab(),
+    );
+  }
+
+  Widget _buildFab() {
+    // [Inference] Only owners are likely to link players.  Non-owners get
+    // the simpler single-button FAB to reduce UI complexity.
+    return FloatingActionButton.extended(
+      onPressed: _showFabMenu,
+      icon: const Icon(Icons.add),
+      label: const Text('Actions'),
+    );
+  }
+
+  /// Shows a bottom sheet with coach management actions.
+  void _showFabMenu() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.person_add),
+              title: const Text('Add Coach'),
+              subtitle: const Text('Invite a coach by email'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showAddCoachDialog();
+              },
+            ),
+            // NEW (v1.3): Link Player → Account
+            ListTile(
+              leading: const Icon(Icons.link),
+              title: const Text('Link Player → Account'),
+              subtitle: const Text(
+                  'Retroactively link an existing player to their account'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showLinkPlayerDialog();
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  // ── Trailing action buttons per coach row ─────────────────────────────────
-
-  /// Returns the appropriate trailing action widget based on permissions:
-  ///  - Cannot remove the owner unless it's the owner removing themselves.
-  ///  - Non-owners can only remove themselves (leave).
   Widget? _buildTrailingActions(
     Map<String, dynamic> coach,
     bool isOwner,
     bool isCurrentUser,
     bool isCurrentUserOwner,
   ) {
-    // Never allow removing another user's owner badge via this button.
     if (isOwner && !isCurrentUser) return null;
-
-    // Show remove/leave button only for self-removal or owner removing others.
     if (isCurrentUser || isCurrentUserOwner) {
       return IconButton(
         icon: Icon(
@@ -570,7 +745,6 @@ class _ManageCoachesScreenState extends State<ManageCoachesScreen> {
         tooltip: isCurrentUser ? 'Leave team' : 'Remove coach',
       );
     }
-
     return null;
   }
 }

@@ -9,7 +9,6 @@
 .pub-cache/
 .pub/
 /coverage/
-lib/generated_plugin_registrant.dart
 
 # --- BUILD FOLDER LOGIC ---
 # Ignore all build artifacts by default to keep the repo small

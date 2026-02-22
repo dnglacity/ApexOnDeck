@@ -1,15 +1,9 @@
 AOD v1.3
 
-Edit tab name font colors on the game_roster_screen so they are White.
+Change the link to player function to be automatic when editing or adding player rather than a separate manual task.
 
-Once names are placed into either starting or bench, save those positions.
- 
-Supabase Realtime on game_rosters — Add a .stream() in SavedRosterScreen so roster changes made on another coach's device appear instantly.
 
-RPC for add_player_account — The auto-link trigger handles new players; add an RPC so coaches can manually link existing players to accounts retroactively from the ManageCoachesScreen.
+TabBarView lazy loading — Both tabs in GameRosterScreen build immediately. Wrapping the body in IndexedStack or using AutomaticKeepAliveClientMixin .hould prevent the available-players list from re-rendering every tab switch.
 
-Player self-view screen — Once a player logs in and sees their team with the "PLAYER" badge, give them a read-only view of their own attendance record and list of teammates.
-
-Offline support — Cache game_rosters and players locally and sync on reconnect — useful for coaches in gyms with poor signal.
-coaches.email column — Verify this column exists; addCoachToTeam() and the email-link trigger both query against it. If it's missing, add ALTER TABLE coaches ADD COLUMN email text; and backfill from auth.users.
+Pagination on players list; use .range() with an infinite scroll ListView.
 

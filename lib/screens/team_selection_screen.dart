@@ -3,22 +3,41 @@ import '../services/player_service.dart';
 import '../services/auth_service.dart';
 import 'roster_screen.dart';
 import 'login_screen.dart';
+import 'player_self_view_screen.dart'; // NEW (Notes.txt v1.3): player self-view
 
 // ─────────────────────────────────────────────────────────────────────────────
-// team_selection_screen.dart
+// team_selection_screen.dart  (AOD v1.3)
 //
 // Shows all teams the authenticated coach belongs to.
 // Also shows teams where the user is a "player" (via player_accounts),
 // distinguished by a player icon instead of the coach shield.
 //
+// BUG FIX (bugfix.txt Issue 1 / team_selection_screen.dart:534):
+//   The original code called nameController.dispose() and sportController.dispose()
+//   immediately after showDialog() returned. Flutter's dialog close animation runs
+//   one extra frame *after* the Future resolves, meaning the TextField's animation
+//   state tries to call addListener on a disposed ChangeNotifier — causing:
+//
+//     "A TextEditingController was used after being disposed."
+//     "A RenderFlex overflowed by 99785 pixels on the bottom."
+//     "_dependents.isEmpty: is not true."
+//
+//   FIX: Move all controller.dispose() calls into WidgetsBinding.instance
+//   .addPostFrameCallback((_) { ... }) so disposal happens *after* the frame
+//   in which the close-animation finalises.  This pattern matches the fix
+//   already applied to game_roster_screen.dart and saved_roster_screen.dart.
+//
 // CHANGE (Notes.txt): Three-dot menu Logout now executes a full
 //   AuthService.signOut() and navigates back to LoginScreen.
 //
 // CHANGE (Notes.txt): Player-linked teams display with a player icon (person
-//   running) rather than the coach shield, reflecting their player role.
+//   running) rather than the coach shield.
 //
-// BUG FIX (Bug 1): Local submission guard renamed from _submitted → submitted
-//   in create/edit team dialogs.
+// CHANGE (Notes.txt v1.3): Tapping a player-linked team now routes to
+//   PlayerSelfViewScreen (read-only) instead of the full coach RosterScreen.
+//
+// BUG FIX (Bug 1): Local submission guard is a plain `bool submitted` variable
+//   rather than a class-member `_submitted`, preventing double-submit.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class TeamSelectionScreen extends StatefulWidget {
@@ -43,21 +62,18 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
   /// Re-fetches the team list (coach teams + player-linked teams).
   void _refreshTeams() {
     setState(() {
-      // getTeams() returns coach teams; getPlayerTeams() returns teams the
-      // account is linked to as a player. Both are merged here.
       _teamsFuture = _loadAllTeams();
     });
   }
 
   /// Merges coach teams and player-linked teams into one sorted list.
   /// Player-linked entries include `is_player: true` so the UI can
-  /// distinguish them.
+  /// distinguish them and route differently.
   Future<List<Map<String, dynamic>>> _loadAllTeams() async {
     final coachTeams = await _playerService.getTeams();
     final playerTeams = await _playerService.getPlayerLinkedTeams();
 
-    // Deduplicate: if the same team_id appears in both (shouldn't happen,
-    // but guard against it), prefer the coach entry.
+    // Deduplicate: prefer the coach entry if the same team_id appears in both.
     final seenIds = <String>{};
     final merged = <Map<String, dynamic>>[];
 
@@ -76,10 +92,6 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
 
   // ── Full logout ───────────────────────────────────────────────────────────
 
-  /// CHANGE (Notes.txt): Logout now calls AuthService.signOut() and removes
-  /// all routes, returning to LoginScreen. Previously the three-dot logout
-  /// in RosterScreen only called Navigator.popUntil, which did not actually
-  /// sign the user out of Supabase.
   Future<void> _handleLogout() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -133,7 +145,7 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
         TextEditingController(text: team['sport'] ?? 'General');
     final formKey = GlobalKey<FormState>();
 
-    // BUG FIX (Bug 1): Use plain local variable — underscore is for class members.
+    // BUG FIX (Bug 1): plain local variable, no underscore prefix.
     bool submitted = false;
 
     final result = await showDialog<bool>(
@@ -197,6 +209,14 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
       ),
     );
 
+    // BUG FIX (bugfix.txt Issue 1): Deferred disposal prevents
+    // "TextEditingController used after being disposed" assertion.
+    // The dialog's close animation fires one frame after showDialog() returns.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      nameController.dispose();
+      sportController.dispose();
+    });
+
     if (result == true && mounted) {
       try {
         await _playerService.updateTeam(
@@ -218,9 +238,6 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
         }
       }
     }
-
-    nameController.dispose();
-    sportController.dispose();
   }
 
   // ── Delete team dialog ────────────────────────────────────────────────────
@@ -276,8 +293,6 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Select Your Team'),
-        // CHANGE (Notes.txt): Only show the icon on the top left — no text label
-        // on the logout icon. The leading area shows the app icon.
         leading: Padding(
           padding: const EdgeInsets.all(10.0),
           child: Icon(
@@ -287,7 +302,6 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
           ),
         ),
         actions: [
-          // Three-dot overflow menu — log out is the only global action here.
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             onSelected: (v) async {
@@ -343,8 +357,8 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                   const SizedBox(height: 16),
                   const Text(
                     'No teams yet',
-                    style: TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.bold),
+                    style:
+                        TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
                   Text(
@@ -364,26 +378,21 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
               itemBuilder: (ctx, i) {
                 final team = teams[i];
                 final isOwner = team['is_owner'] == true;
-                // CHANGE (Notes.txt): player-linked teams get a different icon.
                 final isPlayer = team['is_player'] == true;
 
                 return Card(
                   elevation: 2,
                   margin: const EdgeInsets.only(bottom: 12),
                   child: ListTile(
-                    // Icon legend:
-                    //  Gold shield  = team owner (coach)
-                    //  Blue group   = added coach
-                    //  Blue runner  = player account (Notes.txt)
                     leading: CircleAvatar(
                       backgroundColor: isPlayer
                           ? colorScheme.primaryContainer
                           : isOwner
-                              ? const Color(0xFFFFF3CD) // light gold
+                              ? const Color(0xFFFFF3CD)
                               : colorScheme.primaryContainer,
                       child: Icon(
                         isPlayer
-                            ? Icons.directions_run  // player icon
+                            ? Icons.directions_run // player icon
                             : isOwner
                                 ? Icons.shield
                                 : Icons.group,
@@ -401,7 +410,6 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                           style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                         const SizedBox(width: 8),
-                        // Badge: OWNER / PLAYER
                         if (isPlayer)
                           _badge('PLAYER', colorScheme.primary,
                               colorScheme.primaryContainer)
@@ -411,7 +419,8 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                       ],
                     ),
                     subtitle: Text(team['sport'] ?? 'General'),
-                    // Player-linked teams are read-only; no edit/delete actions.
+                    // CHANGE (v1.3): Player-linked teams route to PlayerSelfViewScreen.
+                    // Coach teams retain the existing popup menu + RosterScreen route.
                     trailing: isPlayer
                         ? null
                         : PopupMenuButton<String>(
@@ -435,8 +444,8 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                                 await _showDeleteTeamDialog(team);
                               }
                             },
-                            itemBuilder: (_) => [
-                              const PopupMenuItem(
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(
                                 value: 'open',
                                 child: Row(children: [
                                   Icon(Icons.open_in_new, size: 20),
@@ -444,7 +453,7 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                                   Text('Open Roster'),
                                 ]),
                               ),
-                              const PopupMenuItem(
+                              PopupMenuItem(
                                 value: 'edit',
                                 child: Row(children: [
                                   Icon(Icons.edit, size: 20),
@@ -452,7 +461,7 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                                   Text('Edit Team'),
                                 ]),
                               ),
-                              const PopupMenuItem(
+                              PopupMenuItem(
                                 value: 'delete',
                                 child: Row(children: [
                                   Icon(Icons.delete,
@@ -465,17 +474,31 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                             ],
                           ),
                     onTap: () async {
-                      await Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => RosterScreen(
-                            teamId: team['id'],
-                            teamName: team['team_name'],
-                            sport: team['sport'],
+                      if (isPlayer) {
+                        // CHANGE (v1.3): Players see their own read-only view.
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => PlayerSelfViewScreen(
+                              teamId: team['id'],
+                              teamName: team['team_name'],
+                            ),
                           ),
-                        ),
-                      );
-                      _refreshTeams();
+                        );
+                      } else {
+                        // Coaches see the full roster management screen.
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => RosterScreen(
+                              teamId: team['id'],
+                              teamName: team['team_name'],
+                              sport: team['sport'],
+                            ),
+                          ),
+                        );
+                        _refreshTeams();
+                      }
                     },
                   ),
                 );
@@ -584,10 +607,14 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
       ),
     );
 
+    // BUG FIX (bugfix.txt Issue 1): Defer disposal — same reason as above.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      nameController.dispose();
+      sportController.dispose();
+    });
+
     if (result == true && mounted) {
       try {
-        // Uses the create_team RPC (SECURITY DEFINER) to avoid the 42501
-        // RLS bug. See player_service.dart and migration_v2.sql for details.
         await _playerService.createTeam(
           nameController.text.trim(),
           sportController.text.trim(),
@@ -606,8 +633,5 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
         }
       }
     }
-
-    nameController.dispose();
-    sportController.dispose();
   }
 }

@@ -1,20 +1,30 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/player_service.dart';
 import 'game_roster_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// saved_roster_screen.dart
+// saved_roster_screen.dart  (AOD v1.3)
 //
 // Lists saved game rosters for a team and lets the coach create new ones.
+//
+// CHANGE (Notes.txt v1.3): Supabase Realtime via .stream() on game_rosters.
+//   Previously the screen used a one-shot Future (_loadRosters) that required
+//   a manual reload after returning from GameRosterScreen.  Now it subscribes
+//   to PlayerService.getGameRosterStream(teamId) which uses the Supabase
+//   Flutter SDK's built-in WebSocket push.  Any change made on another
+//   coach's device appears instantly in the list without pulling-to-refresh.
+//
+//   The stream subscription is stored in [_rosterSub] and cancelled in
+//   dispose() to avoid memory leaks.
 //
 // CHANGE (Notes.txt): Game roster icon changed from Icons.sports_score to
 //   Icons.assignment (clipboard) throughout this screen.
 //
-// CHANGE: Rosters are now persisted to and loaded from the Supabase
-//   game_rosters table (defined in migration_v2.sql) instead of an
-//   in-memory list. The _SavedRoster model now carries a Supabase ID so
-//   updates and deletes are sent to the DB.
+// CHANGE: Rosters are persisted to and loaded from the Supabase game_rosters
+//   table.  The _SavedRoster model carries a Supabase ID so updates and
+//   deletes are sent to the DB.
 //
 // BUG FIX (Issue 2 / Bug 7): TextEditingController.dispose() is deferred
 //   to the next frame via addPostFrameCallback to avoid "used after dispose"
@@ -42,39 +52,63 @@ class SavedRosterScreen extends StatefulWidget {
 class _SavedRosterScreenState extends State<SavedRosterScreen> {
   final _playerService = PlayerService();
 
-  // The roster list is loaded from Supabase.
+  // CHANGE (v1.3): roster list is now driven by a Realtime stream subscription
+  // instead of a one-shot Future.
   List<_SavedRoster> _rosters = [];
   bool _loading = true;
+
+  /// Supabase Realtime subscription for game_rosters on this team.
+  /// Cancelled in dispose() to prevent memory leaks.
+  StreamSubscription<List<Map<String, dynamic>>>? _rosterSub;
 
   @override
   void initState() {
     super.initState();
-    _loadRosters();
+    _subscribeToRosters();
   }
 
-  // ── Load from Supabase ────────────────────────────────────────────────────
+  @override
+  void dispose() {
+    // Always cancel stream subscriptions — failure to do so keeps the
+    // WebSocket channel open and causes memory/resource leaks.
+    _rosterSub?.cancel();
+    super.dispose();
+  }
 
-  Future<void> _loadRosters() async {
-    setState(() => _loading = true);
-    try {
-      final data = await _playerService.getGameRosters(widget.teamId);
-      setState(() {
-        _rosters = data.map(_SavedRoster.fromMap).toList();
-        _loading = false;
-      });
-    } catch (e) {
-      setState(() => _loading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading rosters: $e')),
-        );
-      }
-    }
+  // ── Realtime subscription ─────────────────────────────────────────────────
+
+  /// Subscribes to game_rosters for this team via the Supabase .stream() API.
+  /// Any INSERT/UPDATE/DELETE on the table (by any coach) triggers an event
+  /// that updates [_rosters] immediately without a page reload.
+  void _subscribeToRosters() {
+    _rosterSub = _playerService
+        .getGameRosterStream(widget.teamId)
+        .listen(
+      (rows) {
+        // Convert raw Supabase rows to the local _SavedRoster model.
+        if (mounted) {
+          setState(() {
+            _rosters = rows.map(_SavedRoster.fromMap).toList();
+            _loading = false;
+          });
+        }
+      },
+      onError: (Object e) {
+        if (mounted) {
+          setState(() => _loading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Roster stream error: $e')),
+          );
+        }
+      },
+    );
   }
 
   // ── Create roster dialog ──────────────────────────────────────────────────
 
   Future<void> _showCreateRosterDialog() async {
+    // Controllers are created here (inside the method) so each dialog
+    // invocation gets fresh instances.
     final titleController =
         TextEditingController(text: '${widget.teamName} vs. ');
     final dateController = TextEditingController();
@@ -88,6 +122,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) {
+          // Sync the stepper int when the text field changes manually.
           void syncSlots(String value) {
             final parsed = int.tryParse(value);
             if (parsed != null && parsed >= 1 && parsed <= 50) {
@@ -104,7 +139,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Title field.
+                    // ── Title ────────────────────────────────────────────────
                     TextFormField(
                       controller: titleController,
                       autofocus: true,
@@ -113,7 +148,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                         labelText: 'Roster Title *',
                         hintText: 'e.g. Tigers vs. Lions',
                         border: OutlineInputBorder(),
-                        // CHANGE: clipboard icon
+                        // CHANGE: clipboard icon prefix
                         prefixIcon: Icon(Icons.assignment),
                       ),
                       validator: (v) => (v == null || v.trim().isEmpty)
@@ -122,7 +157,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                     ),
                     const SizedBox(height: 16),
 
-                    // Date field (optional).
+                    // ── Date (optional) ───────────────────────────────────────
                     TextFormField(
                       controller: dateController,
                       textInputAction: TextInputAction.next,
@@ -136,7 +171,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                     ),
                     const SizedBox(height: 16),
 
-                    // Starter slots stepper.
+                    // ── Starter slots stepper ────────────────────────────────
                     Text(
                       'Starting Roster Size',
                       style: Theme.of(ctx).textTheme.labelLarge,
@@ -169,9 +204,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                             onChanged: syncSlots,
                             validator: (v) {
                               final p = int.tryParse(v ?? '');
-                              if (p == null || p < 1 || p > 50) {
-                                return '1–50';
-                              }
+                              if (p == null || p < 1 || p > 50) return '1–50';
                               return null;
                             },
                           ),
@@ -191,9 +224,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                     Text(
                       'Supports 1–50 starters',
                       style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(ctx)
-                              .colorScheme
-                              .onSurfaceVariant),
+                          color: Theme.of(ctx).colorScheme.onSurfaceVariant),
                     ),
                   ],
                 ),
@@ -213,7 +244,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                     Navigator.pop(
                       ctx,
                       _SavedRoster(
-                        id: null, // DB will assign
+                        id: null, // DB will assign the UUID
                         title: titleController.text.trim(),
                         gameDate: dateController.text.trim().isEmpty
                             ? null
@@ -232,8 +263,11 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
       ),
     );
 
-    // BUG FIX (Issue 2 / Bug 7): Defer disposal to next frame to avoid
-    // "controller used after dispose" when dialog dismissed via barrier.
+    // BUG FIX (Issue 2 / Bug 7): Defer disposal to the next frame.
+    // Disposing immediately after showDialog returns can trigger a
+    // "controller used after dispose" assertion from the animation layer
+    // that still holds a reference to the TextField during the close
+    // animation frame.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       titleController.dispose();
       dateController.dispose();
@@ -242,7 +276,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
 
     if (result != null && mounted) {
       try {
-        // Persist to Supabase and capture the generated ID.
+        // Persist to Supabase and get the generated UUID back.
         final newId = await _playerService.createGameRoster(
           teamId: widget.teamId,
           title: result.title,
@@ -251,10 +285,12 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
         );
 
         final saved = result.copyWith(id: newId);
-        setState(() => _rosters.insert(0, saved));
 
-        // BUG FIX (Bug 2): onCancel: null so AppBar back button only pops
-        // GameRosterScreen, not SavedRosterScreen.
+        // The Realtime stream will automatically add this row to [_rosters]
+        // once Supabase publishes the INSERT event.  We don't need to call
+        // setState manually here.
+
+        // Open the new roster immediately.
         if (mounted) {
           await Navigator.push(
             context,
@@ -266,10 +302,12 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                 gameDate: saved.gameDate,
                 starterSlots: saved.starterSlots,
                 rosterId: saved.id,
+                // BUG FIX (Bug 2): null — AppBar back pops only GameRosterScreen.
                 onCancel: null,
               ),
             ),
           );
+          // No manual reload needed — stream fires automatically on return.
         }
       } catch (e) {
         if (mounted) {
@@ -301,20 +339,17 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
         ),
       ),
     );
-    // Reload after returning in case starters/subs were modified and saved.
-    await _loadRosters();
+    // Realtime stream handles any changes made while inside the roster.
   }
 
   // ── Delete roster ─────────────────────────────────────────────────────────
 
-  Future<void> _confirmDelete(int index) async {
-    final roster = _rosters[index];
+  Future<void> _confirmDelete(_SavedRoster roster) async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Delete Roster'),
-        content:
-            Text('Delete "${roster.title}"? This cannot be undone.'),
+        content: Text('Delete "${roster.title}"? This cannot be undone.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -334,7 +369,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
         if (roster.id != null) {
           await _playerService.deleteGameRoster(roster.id!);
         }
-        setState(() => _rosters.removeAt(index));
+        // Realtime stream will remove the row from the list automatically.
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -362,8 +397,8 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                 style: const TextStyle(
                     fontSize: 16, fontWeight: FontWeight.bold)),
             const Text('Game Rosters',
-                style: TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.normal)),
+                style:
+                    TextStyle(fontSize: 12, fontWeight: FontWeight.normal)),
           ],
         ),
       ),
@@ -376,13 +411,11 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       // CHANGE: clipboard icon
-                      Icon(Icons.assignment,
-                          size: 72, color: Colors.grey[400]),
+                      Icon(Icons.assignment, size: 72, color: Colors.grey[400]),
                       const SizedBox(height: 16),
                       const Text('No game rosters yet',
                           style: TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold)),
+                              fontSize: 20, fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
                       Text(
                         'Tap + to create your first game roster.',
@@ -401,15 +434,13 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                       margin: const EdgeInsets.only(bottom: 12),
                       child: ListTile(
                         leading: CircleAvatar(
-                          backgroundColor:
-                              theme.colorScheme.primaryContainer,
+                          backgroundColor: theme.colorScheme.primaryContainer,
                           // CHANGE: clipboard icon
                           child: Icon(Icons.assignment,
                               color: theme.colorScheme.primary),
                         ),
                         title: Text(r.title,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold)),
+                            style: const TextStyle(fontWeight: FontWeight.bold)),
                         subtitle: Text(r.gameDate != null
                             ? '${r.gameDate} • ${r.starterSlots} starters'
                             : '${r.starterSlots} starters'),
@@ -419,7 +450,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                             if (v == 'open') {
                               await _openRoster(r);
                             } else if (v == 'delete') {
-                              await _confirmDelete(i);
+                              await _confirmDelete(r);
                             }
                           },
                           itemBuilder: (_) => const [
@@ -434,12 +465,10 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                             PopupMenuItem(
                               value: 'delete',
                               child: Row(children: [
-                                Icon(Icons.delete,
-                                    color: Colors.red, size: 20),
+                                Icon(Icons.delete, color: Colors.red, size: 20),
                                 SizedBox(width: 12),
                                 Text('Delete',
-                                    style:
-                                        TextStyle(color: Colors.red)),
+                                    style: TextStyle(color: Colors.red)),
                               ]),
                             ),
                           ],
@@ -462,10 +491,10 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Local model for a saved game roster entry.
-// Now carries an optional `id` from Supabase for persistence.
+// Carries an optional `id` from Supabase for persistence and deletion.
 // ─────────────────────────────────────────────────────────────────────────────
 class _SavedRoster {
-  final String? id;       // Supabase game_rosters.id (null before first save)
+  final String? id; // Supabase game_rosters.id (null before first save)
   final String title;
   final String? gameDate;
   final int starterSlots;
@@ -487,12 +516,12 @@ class _SavedRoster {
       gameDate: map['game_date'] as String?,
       starterSlots: (map['starter_slots'] as int?) ?? 5,
       createdAt: map['created_at'] != null
-          ? DateTime.parse(map['created_at'])
+          ? DateTime.parse(map['created_at'] as String)
           : DateTime.now(),
     );
   }
 
-  /// Returns a copy with overridden fields.
+  /// Returns a copy with overridden [id].
   _SavedRoster copyWith({String? id}) {
     return _SavedRoster(
       id: id ?? this.id,
