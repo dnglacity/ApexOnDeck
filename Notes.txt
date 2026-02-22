@@ -1,5 +1,6 @@
-AOD v1.5
-
+AOD v1.6
+Review supabase_blueprint.json and supabase_policies.json.
+Identify and execute optimization and performance edits.
 
 
 
