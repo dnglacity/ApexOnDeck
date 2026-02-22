@@ -4,30 +4,29 @@ import 'package:sweatdex/models/player.dart';
 import '../services/player_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// game_roster_screen.dart  (AOD v1.3)
+// game_roster_screen.dart  (AOD v1.4)
 //
-// Builds a Starting Lineup and Substitutes bench by tapping or dragging
-// players from the full roster.
+// CHANGE (Notes.txt v1.4 — Tab lazy loading):
+//   Both tab bodies are extracted into dedicated StatefulWidget classes
+//   (_AvailableTabView and _RosterTabView) that mix in
+//   AutomaticKeepAliveClientMixin.  This prevents the Available-players list
+//   from re-rendering every time the coach switches to the Roster tab and back.
+//   State (scroll position, loaded data) is preserved across tab switches.
 //
-// CHANGE (Notes.txt v1.3): TabBar labelColor and unselectedLabelColor set to
-//   Colors.white so that tab text/icons always appear white regardless of the
-//   AppBar's default Material-3 surface-tint colour calculation.
-//   Both the selected-label colour AND the unselected-label colour are set to
-//   white; a reduced opacity is applied to unselected labels via
-//   unselectedLabelColor so the active tab still looks distinct.
+// CHANGE (Notes.txt v1.4 — Editable positions on game roster):
+//   Each player tile in the Starting Lineup and Substitutes lists now shows a
+//   tappable "position" chip beneath the player name.  Tapping it opens a
+//   compact inline text field to temporarily override the position for this
+//   game roster session only.  The override is stored in a local Map
+//   (_positionOverrides) keyed by player.id and is included in the saved
+//   roster JSON as a `position_override` key alongside `player_id` and
+//   `slot_number`.  Overrides are restored when reopening a saved roster.
 //
-// CHANGE (Notes.txt v1.3): When [rosterId] is provided, _loadPlayers() now
-//   also fetches the previously saved starters/substitutes from Supabase via
-//   PlayerService.getGameRosterById() and pre-populates the lists.  This means
-//   positions that were saved on another device will be restored when the
-//   coach reopens a roster.
-//
-// CHANGE (Notes.txt): Clipboard icon (Icons.assignment) replaces
-//   Icons.sports_score throughout.
-//
-// BUG FIX (Bug 7): _showSlotDialog() defers TextEditingController.dispose()
-//   to the next frame via addPostFrameCallback to avoid use-after-dispose
-//   errors when the dialog is dismissed via barrier tap.
+// Retained from v1.3:
+//   • Clipboard icon throughout.
+//   • White tab text on blue AppBar.
+//   • Saved roster restore via getGameRosterById().
+//   • BUG FIX (Bug 7): deferred TextEditingController.dispose().
 // ─────────────────────────────────────────────────────────────────────────────
 
 class GameRosterScreen extends StatefulWidget {
@@ -36,10 +35,7 @@ class GameRosterScreen extends StatefulWidget {
   final String? rosterTitle;
   final String? gameDate;
   final int starterSlots;
-  final String? rosterId; // Supabase game_rosters.id — null = unsaved
-
-  /// Optional cancel callback shown as a bottom button.
-  /// null = hidden; user uses the AppBar back arrow.
+  final String? rosterId;
   final VoidCallback? onCancel;
 
   const GameRosterScreen({
@@ -65,9 +61,12 @@ class _GameRosterScreenState extends State<GameRosterScreen>
   List<Player> _starters = [];
   List<Player> _substitutes = [];
   bool _loading = true;
-
   late TabController _tabController;
   late int _starterSlots;
+
+  // CHANGE (v1.4): Per-game position overrides — keyed by player.id.
+  // These are temporary session overrides; they do NOT alter the player DB row.
+  final Map<String, String> _positionOverrides = {};
 
   @override
   void initState() {
@@ -85,47 +84,38 @@ class _GameRosterScreenState extends State<GameRosterScreen>
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
-  /// Loads the full player list for this team, then — if a [rosterId] was
-  /// provided — restores previously saved starter/sub positions from Supabase.
   Future<void> _loadPlayers() async {
     try {
-      // Step 1: Fetch all players for this team.
       final players = await _playerService.getPlayers(widget.teamId);
 
-      // Step 2: If we have a saved roster, restore its lineup.
       if (widget.rosterId != null) {
         final rosterData =
             await _playerService.getGameRosterById(widget.rosterId!);
         if (rosterData != null) {
-          // rosterData['starters'] and ['substitutes'] are List<Map> with
-          // {player_id, slot_number}.  Map them back to Player objects,
-          // preserving slot_number ordering.
           final starterIds = _extractOrderedIds(rosterData['starters']);
           final subIds = _extractOrderedIds(rosterData['substitutes']);
-
           final playerMap = {for (final p in players) p.id: p};
 
-          final savedStarters = starterIds
-              .where((id) => playerMap.containsKey(id))
-              .map((id) => playerMap[id]!)
-              .toList();
-
-          final savedSubs = subIds
-              .where((id) => playerMap.containsKey(id))
-              .map((id) => playerMap[id]!)
-              .toList();
+          // CHANGE (v1.4): Restore position overrides from saved JSON.
+          _restorePositionOverrides(rosterData['starters']);
+          _restorePositionOverrides(rosterData['substitutes']);
 
           setState(() {
             _allPlayers = players;
-            _starters = savedStarters;
-            _substitutes = savedSubs;
+            _starters = starterIds
+                .where((id) => playerMap.containsKey(id))
+                .map((id) => playerMap[id]!)
+                .toList();
+            _substitutes = subIds
+                .where((id) => playerMap.containsKey(id))
+                .map((id) => playerMap[id]!)
+                .toList();
             _loading = false;
           });
           return;
         }
       }
 
-      // No saved roster — start with empty starters/subs.
       setState(() {
         _allPlayers = players;
         _loading = false;
@@ -140,18 +130,31 @@ class _GameRosterScreenState extends State<GameRosterScreen>
     }
   }
 
-  /// Extracts player IDs in slot_number order from a JSON list.
-  /// Handles both List<Map> (JSONB from Supabase) and null gracefully.
+  // ── ID extraction helpers ─────────────────────────────────────────────────
+
   List<String> _extractOrderedIds(dynamic raw) {
     if (raw == null) return [];
     final list = raw as List;
     final sorted = List<Map<String, dynamic>>.from(list)
       ..sort((a, b) =>
-          ((a['slot_number'] ?? 0) as int).compareTo((b['slot_number'] ?? 0) as int));
+          ((a['slot_number'] ?? 0) as int)
+              .compareTo((b['slot_number'] ?? 0) as int));
     return sorted
         .map((m) => (m['player_id'] ?? '') as String)
         .where((id) => id.isNotEmpty)
         .toList();
+  }
+
+  // CHANGE (v1.4): Read position_override from each saved slot entry.
+  void _restorePositionOverrides(dynamic raw) {
+    if (raw == null) return;
+    for (final slot in raw as List) {
+      final id = slot['player_id'] as String? ?? '';
+      final override = slot['position_override'] as String?;
+      if (id.isNotEmpty && override != null && override.isNotEmpty) {
+        _positionOverrides[id] = override;
+      }
+    }
   }
 
   // ── Available players ─────────────────────────────────────────────────────
@@ -206,12 +209,101 @@ class _GameRosterScreenState extends State<GameRosterScreen>
   void _clearAll() => setState(() {
         _starters.clear();
         _substitutes.clear();
+        _positionOverrides.clear();  // CHANGE (v1.4): clear overrides too
       });
+
+  // ── Position override edit ────────────────────────────────────────────────
+
+  /// CHANGE (v1.4): Shows an inline bottom sheet for a coach to temporarily
+  /// override a player's position for this game roster only.
+  Future<void> _editPositionOverride(Player player) async {
+    final controller = TextEditingController(
+      // Pre-fill with existing override, then player's default position.
+      text: _positionOverrides[player.id] ?? player.position ?? '',
+    );
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true, // allows keyboard to push sheet up
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(
+          left: 24,
+          right: 24,
+          top: 24,
+          bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Position override for ${player.name}',
+              style: Theme.of(ctx)
+                  .textTheme
+                  .titleMedium
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'This only changes the displayed position for this game roster. '
+              "It does not edit the player's profile.",
+              style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                labelText: 'Position (game override)',
+                hintText: 'e.g., Point Guard, Pitcher, Sweeper',
+                prefixIcon: Icon(Icons.sports),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () {
+                    // Clear override — revert to player's default.
+                    setState(() => _positionOverrides.remove(player.id));
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Clear'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: () {
+                    final text = controller.text.trim();
+                    setState(() {
+                      if (text.isEmpty) {
+                        _positionOverrides.remove(player.id);
+                      } else {
+                        _positionOverrides[player.id] = text;
+                      }
+                    });
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Save'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    // BUG FIX (Bug 7 pattern): defer dispose to next frame.
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => controller.dispose());
+  }
 
   // ── Slot-count dialog ─────────────────────────────────────────────────────
 
-  /// BUG FIX (Bug 7): Dispose deferred to next frame to avoid
-  /// use-after-dispose when dialog is dismissed via barrier tap.
   Future<void> _showSlotDialog() async {
     int temp = _starterSlots;
     final controller = TextEditingController(text: '$temp');
@@ -289,27 +381,34 @@ class _GameRosterScreenState extends State<GameRosterScreen>
       ),
     );
 
-    // BUG FIX (Bug 7): Defer disposal so the animation frame that runs
-    // immediately after dialog close doesn't fire on a disposed controller.
-    WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose());
+    // BUG FIX (Bug 7): defer dispose.
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => controller.dispose());
   }
 
   // ── Save roster ───────────────────────────────────────────────────────────
 
-  /// Persists starters and subs to the Supabase game_rosters table.
-  /// If [rosterId] is provided, updates the existing row; otherwise shows
-  /// a summary dialog (no Supabase ID means the roster was never persisted).
   Future<void> _saveRoster() async {
     if (widget.rosterId != null) {
       try {
-        // Build JSONB payload: [{player_id, slot_number}]
+        // CHANGE (v1.4): Include position_override in each slot entry.
         final starterData = [
           for (int i = 0; i < _starters.length; i++)
-            {'player_id': _starters[i].id, 'slot_number': i + 1},
+            {
+              'player_id': _starters[i].id,
+              'slot_number': i + 1,
+              if (_positionOverrides.containsKey(_starters[i].id))
+                'position_override': _positionOverrides[_starters[i].id],
+            },
         ];
         final subData = [
           for (int i = 0; i < _substitutes.length; i++)
-            {'player_id': _substitutes[i].id, 'slot_number': i + 1},
+            {
+              'player_id': _substitutes[i].id,
+              'slot_number': i + 1,
+              if (_positionOverrides.containsKey(_substitutes[i].id))
+                'position_override': _positionOverrides[_substitutes[i].id],
+            },
         ];
 
         await _playerService.updateGameRosterLineup(
@@ -336,7 +435,6 @@ class _GameRosterScreenState extends State<GameRosterScreen>
         }
       }
     } else {
-      // No DB ID — show a summary instead.
       showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -362,7 +460,6 @@ class _GameRosterScreenState extends State<GameRosterScreen>
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final displayTitle = widget.rosterTitle ?? widget.teamName;
 
     return Scaffold(
@@ -372,7 +469,8 @@ class _GameRosterScreenState extends State<GameRosterScreen>
           children: [
             Text(
               displayTitle,
-              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              style:
+                  const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -382,7 +480,8 @@ class _GameRosterScreenState extends State<GameRosterScreen>
                       fontSize: 11, fontWeight: FontWeight.normal))
             else
               const Text('Game Roster Builder',
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.normal)),
+                  style:
+                      TextStyle(fontSize: 11, fontWeight: FontWeight.normal)),
           ],
         ),
         actions: [
@@ -426,12 +525,6 @@ class _GameRosterScreenState extends State<GameRosterScreen>
             onPressed: _starters.isEmpty ? null : _saveRoster,
           ),
         ],
-        // ── CHANGE (Notes.txt v1.3): White tab font colors ─────────────────
-        // The AppBar background is deep blue (_brandBlue). Without explicit
-        // labelColor, Material 3 picks ColorScheme.primary (#1A3A6B) for the
-        // selected label — invisible on blue.  Setting both to white ensures
-        // readability.  Unselected tabs use 70% opacity white so they still
-        // feel visually distinct from the active tab.
         bottom: TabBar(
           controller: _tabController,
           labelColor: Colors.white,
@@ -452,7 +545,6 @@ class _GameRosterScreenState extends State<GameRosterScreen>
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // CHANGE: clipboard icon in the Roster tab.
                   const Icon(Icons.assignment, size: 16),
                   const SizedBox(width: 6),
                   Text('Roster (${_starters.length}/$_starterSlots)'),
@@ -464,11 +556,43 @@ class _GameRosterScreenState extends State<GameRosterScreen>
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
+          // CHANGE (v1.4): TabBarView children are now separate StatefulWidgets
+          // that implement AutomaticKeepAliveClientMixin.  This prevents the
+          // Available-players list from re-rendering on every tab switch.
           : TabBarView(
               controller: _tabController,
               children: [
-                _buildAvailableTab(theme),
-                _buildRosterTab(theme),
+                _AvailableTabView(
+                  allPlayers: _allPlayers,
+                  availablePlayers: _availablePlayers,
+                  onAddStarter: _addToStarters,
+                  onAddSub: _addToSubs,
+                ),
+                _RosterTabView(
+                  starters: _starters,
+                  substitutes: _substitutes,
+                  starterSlots: _starterSlots,
+                  positionOverrides: _positionOverrides,
+                  onDropToStarters: _addToStarters,
+                  onDropToSubs: _addToSubs,
+                  onRemoveStarter: _removeFromStarters,
+                  onRemoveSub: _removeFromSubs,
+                  onSendToBench: _demoteStarterToSub,
+                  onPromote: _promoteSubToStarter,
+                  onReorderStarters: (old, neo) {
+                    setState(() {
+                      final p = _starters.removeAt(old);
+                      _starters.insert(neo, p);
+                    });
+                  },
+                  onReorderSubs: (old, neo) {
+                    setState(() {
+                      final p = _substitutes.removeAt(old);
+                      _substitutes.insert(neo, p);
+                    });
+                  },
+                  onEditPosition: _editPositionOverride, // CHANGE (v1.4)
+                ),
               ],
             ),
       bottomNavigationBar: widget.onCancel != null
@@ -490,13 +614,49 @@ class _GameRosterScreenState extends State<GameRosterScreen>
           : null,
     );
   }
+}
 
-  // ── Available tab ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// _AvailableTabView  (CHANGE v1.4 — lazy loading via keep-alive mixin)
+//
+// Wrapping the "Available" tab body in its own StatefulWidget with
+// AutomaticKeepAliveClientMixin prevents Flutter from discarding and
+// rebuilding this widget every time the coach switches to the Roster tab.
+// Scroll position and list state are preserved across tab switches.
+// ─────────────────────────────────────────────────────────────────────────────
+class _AvailableTabView extends StatefulWidget {
+  final List<Player> allPlayers;
+  final List<Player> availablePlayers;
+  final ValueChanged<Player> onAddStarter;
+  final ValueChanged<Player> onAddSub;
 
-  Widget _buildAvailableTab(ThemeData theme) {
-    final available = _availablePlayers;
+  const _AvailableTabView({
+    required this.allPlayers,
+    required this.availablePlayers,
+    required this.onAddStarter,
+    required this.onAddSub,
+  });
 
-    if (_allPlayers.isEmpty) {
+  @override
+  State<_AvailableTabView> createState() => _AvailableTabViewState();
+}
+
+class _AvailableTabViewState extends State<_AvailableTabView>
+    with AutomaticKeepAliveClientMixin {
+
+  // AutomaticKeepAliveClientMixin: keep this tab alive across switches.
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    // Required call when using AutomaticKeepAliveClientMixin.
+    super.build(context);
+
+    final theme = Theme.of(context);
+    final available = widget.availablePlayers;
+
+    if (widget.allPlayers.isEmpty) {
       return const Center(
         child: Text(
           'No players on this team yet.\nAdd players from the Roster screen.',
@@ -534,8 +694,8 @@ class _GameRosterScreenState extends State<GameRosterScreen>
               final p = available[i];
               return _DraggablePlayerCard(
                 player: p,
-                onAddStarter: () => _addToStarters(p),
-                onAddSub: () => _addToSubs(p),
+                onAddStarter: () => widget.onAddStarter(p),
+                onAddSub: () => widget.onAddSub(p),
               );
             },
           ),
@@ -543,10 +703,60 @@ class _GameRosterScreenState extends State<GameRosterScreen>
       ],
     );
   }
+}
 
-  // ── Roster tab ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// _RosterTabView  (CHANGE v1.4 — lazy loading + editable positions)
+//
+// Wrapping the "Roster" tab body in its own StatefulWidget with
+// AutomaticKeepAliveClientMixin prevents state loss when switching tabs.
+// ─────────────────────────────────────────────────────────────────────────────
+class _RosterTabView extends StatefulWidget {
+  final List<Player> starters;
+  final List<Player> substitutes;
+  final int starterSlots;
+  final Map<String, String> positionOverrides;
+  final ValueChanged<Player> onDropToStarters;
+  final ValueChanged<Player> onDropToSubs;
+  final ValueChanged<Player> onRemoveStarter;
+  final ValueChanged<Player> onRemoveSub;
+  final ValueChanged<Player> onSendToBench;
+  final ValueChanged<Player> onPromote;
+  final void Function(int, int) onReorderStarters;
+  final void Function(int, int) onReorderSubs;
+  final ValueChanged<Player> onEditPosition; // CHANGE (v1.4)
 
-  Widget _buildRosterTab(ThemeData theme) {
+  const _RosterTabView({
+    required this.starters,
+    required this.substitutes,
+    required this.starterSlots,
+    required this.positionOverrides,
+    required this.onDropToStarters,
+    required this.onDropToSubs,
+    required this.onRemoveStarter,
+    required this.onRemoveSub,
+    required this.onSendToBench,
+    required this.onPromote,
+    required this.onReorderStarters,
+    required this.onReorderSubs,
+    required this.onEditPosition,
+  });
+
+  @override
+  State<_RosterTabView> createState() => _RosterTabViewState();
+}
+
+class _RosterTabViewState extends State<_RosterTabView>
+    with AutomaticKeepAliveClientMixin {
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin.
+
+    final theme = Theme.of(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -555,54 +765,47 @@ class _GameRosterScreenState extends State<GameRosterScreen>
           _sectionHeader(
             context: context,
             label: 'Starting Lineup',
-            count: _starters.length,
-            max: _starterSlots,
+            count: widget.starters.length,
+            max: widget.starterSlots,
             color: theme.colorScheme.primary,
             icon: Icons.star,
           ),
           const SizedBox(height: 8),
           _StarterDropZone(
-            starters: _starters,
-            starterSlots: _starterSlots,
-            onDropPlayer: _addToStarters,
-            onRemove: _removeFromStarters,
-            onSendToBench: _demoteStarterToSub,
-            onReorder: (oldIdx, newIdx) {
-              setState(() {
-                final p = _starters.removeAt(oldIdx);
-                _starters.insert(newIdx, p);
-              });
-            },
+            starters: widget.starters,
+            starterSlots: widget.starterSlots,
+            positionOverrides: widget.positionOverrides,
+            onDropPlayer: widget.onDropToStarters,
+            onRemove: widget.onRemoveStarter,
+            onSendToBench: widget.onSendToBench,
+            onEditPosition: widget.onEditPosition, // CHANGE (v1.4)
+            onReorder: widget.onReorderStarters,
           ),
           const SizedBox(height: 24),
           _sectionHeader(
             context: context,
             label: 'Substitutes Bench',
-            count: _substitutes.length,
+            count: widget.substitutes.length,
             max: null,
             color: theme.colorScheme.secondary,
             icon: Icons.airline_seat_recline_normal,
           ),
           const SizedBox(height: 8),
           _SubsDropZone(
-            substitutes: _substitutes,
-            onDropPlayer: _addToSubs,
-            onRemove: _removeFromSubs,
-            onPromote: _promoteSubToStarter,
-            onReorder: (oldIdx, newIdx) {
-              setState(() {
-                final p = _substitutes.removeAt(oldIdx);
-                _substitutes.insert(newIdx, p);
-              });
-            },
+            substitutes: widget.substitutes,
+            positionOverrides: widget.positionOverrides,
+            onDropPlayer: widget.onDropToSubs,
+            onRemove: widget.onRemoveSub,
+            onPromote: widget.onPromote,
+            onEditPosition: widget.onEditPosition,  // CHANGE (v1.4)
+            onReorder: widget.onReorderSubs,
           ),
-          if (_starters.isEmpty && _substitutes.isEmpty)
+          if (widget.starters.isEmpty && widget.substitutes.isEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 32),
               child: Center(
                 child: Column(
                   children: [
-                    // CHANGE: clipboard icon in empty state
                     Icon(Icons.assignment, size: 64, color: Colors.grey[400]),
                     const SizedBox(height: 12),
                     Text(
@@ -681,7 +884,8 @@ class _DraggablePlayerCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         child: Container(
           width: 240,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.primaryContainer,
             borderRadius: BorderRadius.circular(8),
@@ -709,7 +913,8 @@ class _DraggablePlayerCard extends StatelessWidget {
           ),
         ),
       ),
-      childWhenDragging: Opacity(opacity: 0.3, child: _buildCard(context)),
+      childWhenDragging:
+          Opacity(opacity: 0.3, child: _buildCard(context)),
       child: _buildCard(context),
     );
   }
@@ -719,7 +924,8 @@ class _DraggablePlayerCard extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+          backgroundColor:
+              Theme.of(context).colorScheme.primaryContainer,
           child: Text(
             player.jerseyNumber ?? '?',
             style: TextStyle(
@@ -731,10 +937,8 @@ class _DraggablePlayerCard extends StatelessWidget {
         ),
         title: Text(player.name,
             style: const TextStyle(fontWeight: FontWeight.w500)),
-        subtitle: player.nickname != null
-            ? Text('"${player.nickname}"',
-                style: const TextStyle(fontStyle: FontStyle.italic))
-            : null,
+        // Show position and/or nickname in subtitle.
+        subtitle: _buildSubtitle(),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -749,7 +953,9 @@ class _DraggablePlayerCard extends StatelessWidget {
             Tooltip(
               message: 'Add to bench',
               child: IconButton(
-                icon: const Icon(Icons.airline_seat_recline_normal, size: 20),
+                icon: const Icon(
+                    Icons.airline_seat_recline_normal,
+                    size: 20),
                 onPressed: onAddSub,
                 color: Theme.of(context).colorScheme.secondary,
               ),
@@ -759,25 +965,42 @@ class _DraggablePlayerCard extends StatelessWidget {
       ),
     );
   }
+
+  Widget? _buildSubtitle() {
+    final parts = <String>[];
+    if (player.position != null && player.position!.isNotEmpty) {
+      parts.add(player.position!);
+    }
+    if (player.nickname != null && player.nickname!.isNotEmpty) {
+      parts.add('"${player.nickname}"');
+    }
+    if (parts.isEmpty) return null;
+    return Text(parts.join(' • '),
+        style: const TextStyle(fontStyle: FontStyle.italic));
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _StarterDropZone — reorderable starters list with drag-target overlay
+// _StarterDropZone
 // ─────────────────────────────────────────────────────────────────────────────
 class _StarterDropZone extends StatelessWidget {
   final List<Player> starters;
   final int starterSlots;
+  final Map<String, String> positionOverrides;
   final ValueChanged<Player> onDropPlayer;
   final ValueChanged<Player> onRemove;
   final ValueChanged<Player> onSendToBench;
+  final ValueChanged<Player> onEditPosition; // CHANGE (v1.4)
   final void Function(int, int) onReorder;
 
   const _StarterDropZone({
     required this.starters,
     required this.starterSlots,
+    required this.positionOverrides,
     required this.onDropPlayer,
     required this.onRemove,
     required this.onSendToBench,
+    required this.onEditPosition,
     required this.onReorder,
   });
 
@@ -787,7 +1010,8 @@ class _StarterDropZone extends StatelessWidget {
     final isFull = starters.length >= starterSlots;
 
     return DragTarget<Player>(
-      onWillAcceptWithDetails: (d) => !starters.contains(d.data) && !isFull,
+      onWillAcceptWithDetails: (d) =>
+          !starters.contains(d.data) && !isFull,
       onAcceptWithDetails: (d) => onDropPlayer(d.data),
       builder: (_, candidateData, __) {
         final isHovering = candidateData.isNotEmpty;
@@ -832,6 +1056,8 @@ class _StarterDropZone extends StatelessWidget {
                       player: p,
                       slotNumber: i + 1,
                       accentColor: theme.colorScheme.primary,
+                      positionOverrides: positionOverrides,
+                      onEditPosition: onEditPosition,   // CHANGE (v1.4)
                       trailingActions: [
                         Tooltip(
                           message: 'Move to bench',
@@ -861,27 +1087,30 @@ class _StarterDropZone extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _SubsDropZone — reorderable bench list with drag-target overlay
+// _SubsDropZone
 // ─────────────────────────────────────────────────────────────────────────────
 class _SubsDropZone extends StatelessWidget {
   final List<Player> substitutes;
+  final Map<String, String> positionOverrides;
   final ValueChanged<Player> onDropPlayer;
   final ValueChanged<Player> onRemove;
   final ValueChanged<Player> onPromote;
+  final ValueChanged<Player> onEditPosition; // CHANGE (v1.4)
   final void Function(int, int) onReorder;
 
   const _SubsDropZone({
     required this.substitutes,
+    required this.positionOverrides,
     required this.onDropPlayer,
     required this.onRemove,
     required this.onPromote,
+    required this.onEditPosition,
     required this.onReorder,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
     return DragTarget<Player>(
       onWillAcceptWithDetails: (d) => !substitutes.contains(d.data),
       onAcceptWithDetails: (d) => onDropPlayer(d.data),
@@ -906,7 +1135,8 @@ class _SubsDropZone extends StatelessWidget {
                   padding: const EdgeInsets.all(24),
                   child: Center(
                     child: Text(
-                      'Drag players here or tap the bench icon on the Available tab',
+                      'Drag players here or tap the bench icon on the '
+                      'Available tab',
                       style: TextStyle(
                           color: theme.colorScheme.onSurfaceVariant,
                           fontStyle: FontStyle.italic),
@@ -926,6 +1156,8 @@ class _SubsDropZone extends StatelessWidget {
                       player: p,
                       slotNumber: i + 1,
                       accentColor: theme.colorScheme.secondary,
+                      positionOverrides: positionOverrides,
+                      onEditPosition: onEditPosition,   // CHANGE (v1.4)
                       trailingActions: [
                         Tooltip(
                           message: 'Promote to starter',
@@ -953,12 +1185,18 @@ class _SubsDropZone extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _RosterRowTile — shared tile inside both reorderable lists
+// _RosterRowTile — shared tile inside both reorderable lists.
+//
+// CHANGE (v1.4): Shows a tappable position chip beneath the player name.
+// Tapping the chip calls [onEditPosition] to open the override sheet.
+// The effective position is: override (if set) → player.position → '—'.
 // ─────────────────────────────────────────────────────────────────────────────
 class _RosterRowTile extends StatelessWidget {
   final Player player;
   final int slotNumber;
   final Color accentColor;
+  final Map<String, String> positionOverrides;
+  final ValueChanged<Player> onEditPosition;
   final List<Widget> trailingActions;
 
   const _RosterRowTile({
@@ -966,13 +1204,21 @@ class _RosterRowTile extends StatelessWidget {
     required this.player,
     required this.slotNumber,
     required this.accentColor,
+    required this.positionOverrides,
+    required this.onEditPosition,
     required this.trailingActions,
   });
 
   @override
   Widget build(BuildContext context) {
+    // CHANGE (v1.4): Effective position = override first, then player default.
+    final effectivePosition =
+        positionOverrides[player.id] ?? player.position;
+    final hasOverride = positionOverrides.containsKey(player.id);
+
     return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      contentPadding:
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
       leading: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -992,13 +1238,63 @@ class _RosterRowTile extends StatelessWidget {
           ),
         ],
       ),
-      title:
-          Text(player.name, style: const TextStyle(fontWeight: FontWeight.w500)),
-      subtitle: player.nickname != null
-          ? Text('"${player.nickname}"',
-              style:
-                  const TextStyle(fontStyle: FontStyle.italic, fontSize: 12))
-          : null,
+      title: Text(player.name,
+          style: const TextStyle(fontWeight: FontWeight.w500)),
+      // CHANGE (v1.4): Position chip — tappable to edit.
+      subtitle: GestureDetector(
+        onTap: () => onEditPosition(player),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 2),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: hasOverride
+                    ? accentColor.withValues(alpha: 0.15)
+                    : Colors.grey.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+                border: hasOverride
+                    ? Border.all(
+                        color: accentColor.withValues(alpha: 0.5),
+                        width: 1)
+                    : null,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.edit, size: 10,
+                      color: hasOverride ? accentColor : Colors.grey),
+                  const SizedBox(width: 3),
+                  Text(
+                    effectivePosition?.isNotEmpty == true
+                        ? effectivePosition!
+                        : 'Set position',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: effectivePosition?.isNotEmpty == true
+                          ? (hasOverride ? accentColor : Colors.grey[700])
+                          : Colors.grey,
+                      fontStyle: effectivePosition == null
+                          ? FontStyle.italic
+                          : FontStyle.normal,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (player.nickname != null) ...[
+              const SizedBox(width: 4),
+              Text(
+                '"${player.nickname}"',
+                style: const TextStyle(
+                    fontStyle: FontStyle.italic, fontSize: 12),
+              ),
+            ],
+          ],
+        ),
+      ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: trailingActions,

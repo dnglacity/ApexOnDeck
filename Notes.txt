@@ -1,14 +1,7 @@
-AOD v1.4
+AOD v1.5
 
-Change the link to player function to be automatic when editing or adding player rather than a separate manual task.
+Change all coaches and players to users. Permissions will only be based on team role (owner, coach, player, etc)
 
-TabBarView lazy loading — Both tabs in GameRosterScreen build immediately. Wrapping the body in IndexedStack or using AutomaticKeepAliveClientMixin should prevent the available-players list from re-rendering every tab switch.
-
-Pagination on players list; use .range() with an infinite scroll ListView.
-
-For each player, add a position text field.
-
-Allow coaches to temporarily edit positions on the game roster screen
 
 
 

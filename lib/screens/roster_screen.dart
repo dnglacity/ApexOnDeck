@@ -8,25 +8,39 @@ import 'saved_roster_screen.dart';
 import 'login_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// roster_screen.dart
+// roster_screen.dart  (AOD v1.4)
 //
-// Main per-team player management screen.
+// CHANGE (Notes.txt v1.4 — Pagination with infinite scroll):
+//   The player list is now loaded in pages of [_pageSize] rows using
+//   PlayerService.getPlayersPaginated() which calls Supabase .range().
 //
-// CHANGES (Notes.txt):
-//   1. Three-dot (⋮) Logout now executes a full AuthService.signOut() call
-//      and navigates to LoginScreen — previously it only popped the stack
-//      without signing out of Supabase.
-//   2. Game Roster button in the AppBar now uses Icons.assignment (clipboard)
-//      instead of Icons.sports_score, per Notes.txt "change the game roster
-//      icon on the roster screen to a clipboard."
-//   3. "Only show the icons on the top left." — the AppBar now has no text
-//      labels on action buttons; only icon buttons appear.
-//      The "Game Rosters" and "Bulk Actions" text labels have been removed;
-//      they are now icon-only buttons with tooltips.
-//   4. Blue and Gold theme colours are applied via the inherited ThemeData.
+//   Implementation:
+//     • _players:       accumulated list across all loaded pages.
+//     • _page:          current page index (0-based).
+//     • _hasMore:       false when a page returns fewer rows than _pageSize.
+//     • _isPaginating:  true while a page fetch is in progress (prevents
+//                       duplicate concurrent fetches).
+//     • _scrollController: fires _loadNextPage() when the user scrolls within
+//                          _scrollThreshold pixels of the bottom.
 //
-// BUG FIX (Bug 8): When a coach removes themselves, popUntil(isFirst) is used
-//   so RosterScreen doesn't try to stream players for a team they left.
+//   The attendance summary card (present/absent/late/excused counts) is
+//   derived from the locally accumulated _players list.  This is accurate
+//   for loaded pages; the counts update as new pages load.
+//
+//   Bulk actions (mark all, bulk delete) still use the full getPlayers() /
+//   bulkUpdateStatus() calls so they act on ALL players, not just the
+//   loaded pages.
+//
+//   The real-time StreamBuilder is REPLACED by pagination.  getPlayerStream()
+//   is incompatible with pagination because it returns the full set.
+//   Status updates and deletes refresh the specific tile locally to avoid
+//   a full page reload.
+//
+// CHANGE (Notes.txt v1.4 — Position shown in player subtitle):
+//   The _buildSubtitle() helper now includes the player's `position` field.
+//
+// All pre-existing behaviour (bulk delete, swipe-to-delete, overflow menu,
+// status changes, add/edit, clipboard icon, etc.) is retained unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class RosterScreen extends StatefulWidget {
@@ -49,15 +63,135 @@ class _RosterScreenState extends State<RosterScreen> {
   final _playerService = PlayerService();
   final _authService = AuthService();
 
+  // ── Pagination state ──────────────────────────────────────────────────────
+  // Number of players to load per page.
+  static const int _pageSize = 20;
+
+  List<Player> _players = [];   // accumulated list across all loaded pages
+  int _page = 0;                // next page index to fetch (0-based)
+  bool _hasMore = true;         // becomes false when a page has < _pageSize rows
+  bool _isLoading = true;       // true only on initial load
+  bool _isPaginating = false;   // true while fetching any subsequent page
+
+  // ScrollController drives infinite-scroll detection.
+  final ScrollController _scrollController = ScrollController();
+  // Trigger next page when user is this many pixels from the bottom.
+  static const double _scrollThreshold = 200;
+
   // ── Bulk-delete mode ──────────────────────────────────────────────────────
   bool _bulkDeleteMode = false;
   final Set<String> _selectedIds = {};
+
+  // ─────────────────────────────────────────────────────────────────────────
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    _loadFirstPage();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  // ── Pagination helpers ────────────────────────────────────────────────────
+
+  /// Called by the scroll listener; triggers next page when near the bottom.
+  void _onScroll() {
+    final pos = _scrollController.position;
+    final atBottom =
+        pos.pixels >= (pos.maxScrollExtent - _scrollThreshold);
+    if (atBottom && _hasMore && !_isPaginating) {
+      _loadNextPage();
+    }
+  }
+
+  /// Resets pagination and fetches page 0.
+  Future<void> _loadFirstPage() async {
+    setState(() {
+      _players.clear();
+      _page = 0;
+      _hasMore = true;
+      _isLoading = true;
+    });
+    await _fetchPage();
+    if (mounted) setState(() => _isLoading = false);
+  }
+
+  /// Fetches the next sequential page and appends to [_players].
+  Future<void> _loadNextPage() async {
+    if (!_hasMore || _isPaginating) return;
+    setState(() => _isPaginating = true);
+    await _fetchPage();
+    if (mounted) setState(() => _isPaginating = false);
+  }
+
+  /// Core fetch — reads page [_page] from Supabase via .range().
+  Future<void> _fetchPage() async {
+    try {
+      final from = _page * _pageSize;
+      final to = from + _pageSize - 1;
+
+      final batch = await _playerService.getPlayersPaginated(
+        teamId: widget.teamId,
+        from: from,
+        to: to,
+      );
+
+      if (mounted) {
+        setState(() {
+          _players.addAll(batch);
+          _page++;
+          // If the batch is smaller than a full page, we've reached the end.
+          _hasMore = batch.length == _pageSize;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Error loading players: $e'),
+              backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  // ── Local state helpers ───────────────────────────────────────────────────
+
+  /// Applies a status change locally (avoids a full page reload).
+  void _applyLocalStatusChange(String playerId, String newStatus) {
+    final idx = _players.indexWhere((p) => p.id == playerId);
+    if (idx != -1) {
+      setState(() {
+        _players[idx] = _players[idx].copyWith(status: newStatus);
+      });
+    }
+  }
+
+  /// Removes a player from the local list after deletion.
+  void _removeLocalPlayer(String playerId) {
+    setState(() => _players.removeWhere((p) => p.id == playerId));
+  }
+
+  /// Reloads a single player row after an edit.
+  /// Since the paginated list doesn't stream, we refresh only the edited row.
+  void _refreshAfterEdit(Player updated) {
+    final idx = _players.indexWhere((p) => p.id == updated.id);
+    if (idx != -1) {
+      setState(() => _players[idx] = updated);
+    }
+  }
 
   // ── Status helpers ────────────────────────────────────────────────────────
 
   Future<void> _updatePlayerStatus(Player player, String newStatus) async {
     try {
       await _playerService.updatePlayerStatus(player.id, newStatus);
+      _applyLocalStatusChange(player.id, newStatus);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -85,7 +219,8 @@ class _RosterScreenState extends State<RosterScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _statusOption('present', 'Present', Icons.check_circle, Colors.green),
+            _statusOption(
+                'present', 'Present', Icons.check_circle, Colors.green),
             _statusOption('absent', 'Absent', Icons.cancel, Colors.red),
             _statusOption('late', 'Late', Icons.access_time, Colors.orange),
             _statusOption('excused', 'Excused', Icons.event_busy,
@@ -160,7 +295,14 @@ class _RosterScreenState extends State<RosterScreen> {
       });
     } else {
       try {
+        // Bulk status acts on ALL players, not just loaded pages.
         await _playerService.bulkUpdateStatus(widget.teamId, action);
+        // Refresh locally.
+        setState(() {
+          _players = _players
+              .map((p) => p.copyWith(status: action))
+              .toList();
+        });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('All players marked as $action')),
@@ -169,7 +311,9 @@ class _RosterScreenState extends State<RosterScreen> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+            SnackBar(
+                content: Text('Error: $e'),
+                backgroundColor: Colors.red),
           );
         }
       }
@@ -203,7 +347,8 @@ class _RosterScreenState extends State<RosterScreen> {
                   Checkbox(
                     value: acknowledged,
                     activeColor: Colors.red,
-                    onChanged: (v) => setLocal(() => acknowledged = v ?? false),
+                    onChanged: (v) =>
+                        setLocal(() => acknowledged = v ?? false),
                   ),
                   const Expanded(
                     child: Text(
@@ -221,7 +366,8 @@ class _RosterScreenState extends State<RosterScreen> {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: acknowledged ? () => Navigator.pop(ctx, true) : null,
+              onPressed:
+                  acknowledged ? () => Navigator.pop(ctx, true) : null,
               style: FilledButton.styleFrom(backgroundColor: Colors.red),
               child: const Text('Delete'),
             ),
@@ -231,21 +377,31 @@ class _RosterScreenState extends State<RosterScreen> {
     );
 
     if (confirm == true && mounted) {
+      final ids = _selectedIds.toList();
       try {
-        await _playerService.bulkDeletePlayers(_selectedIds.toList());
+        await _playerService.bulkDeletePlayers(ids);
+        setState(() {
+          _players.removeWhere((p) => ids.contains(p.id));
+          _bulkDeleteMode = false;
+          _selectedIds.clear();
+        });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('${_selectedIds.length} player(s) deleted')),
+            SnackBar(content: Text('${ids.length} player(s) deleted')),
           );
         }
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+            SnackBar(
+                content: Text('Error: $e'),
+                backgroundColor: Colors.red),
           );
         }
-      } finally {
-        if (mounted) setState(() { _bulkDeleteMode = false; _selectedIds.clear(); });
+        setState(() {
+          _bulkDeleteMode = false;
+          _selectedIds.clear();
+        });
       }
     }
   }
@@ -288,7 +444,6 @@ class _RosterScreenState extends State<RosterScreen> {
           ]),
         ),
         PopupMenuDivider(),
-        // CHANGE (Notes.txt): Logout now executes full signOut.
         PopupMenuItem(
           value: 'logout',
           child: Row(children: [
@@ -323,13 +478,11 @@ class _RosterScreenState extends State<RosterScreen> {
         await _confirmDeleteRoster();
         break;
       case 'logout':
-        // CHANGE (Notes.txt): Full signOut — not just a stack pop.
         await _performLogout();
         break;
     }
   }
 
-  /// Signs the user out and navigates to LoginScreen, clearing the stack.
   Future<void> _performLogout() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -353,10 +506,8 @@ class _RosterScreenState extends State<RosterScreen> {
     if (confirm != true || !mounted) return;
 
     try {
-      // Supabase signOut — invalidates the access token on the server.
       await _authService.signOut();
       if (mounted) {
-        // Remove all routes so the user cannot go "back" to the roster.
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => const LoginScreen()),
           (route) => false,
@@ -385,8 +536,8 @@ class _RosterScreenState extends State<RosterScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Permanently delete ALL players from "${widget.teamName}"? '
-                'This cannot be undone.',
+                'Permanently delete ALL players from '
+                '"${widget.teamName}"? This cannot be undone.',
               ),
               const SizedBox(height: 16),
               Row(
@@ -394,7 +545,8 @@ class _RosterScreenState extends State<RosterScreen> {
                   Checkbox(
                     value: acknowledged,
                     activeColor: Colors.red,
-                    onChanged: (v) => setLocal(() => acknowledged = v ?? false),
+                    onChanged: (v) =>
+                        setLocal(() => acknowledged = v ?? false),
                   ),
                   const Expanded(
                     child: Text(
@@ -412,7 +564,8 @@ class _RosterScreenState extends State<RosterScreen> {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: acknowledged ? () => Navigator.pop(ctx, true) : null,
+              onPressed:
+                  acknowledged ? () => Navigator.pop(ctx, true) : null,
               style: FilledButton.styleFrom(backgroundColor: Colors.red),
               child: const Text('Delete All'),
             ),
@@ -423,9 +576,10 @@ class _RosterScreenState extends State<RosterScreen> {
 
     if (confirm == true && mounted) {
       try {
-        final players = await _playerService.getPlayers(widget.teamId);
-        await _playerService.bulkDeletePlayers(
-            players.map((p) => p.id).toList());
+        final allPlayers = await _playerService.getPlayers(widget.teamId);
+        await _playerService
+            .bulkDeletePlayers(allPlayers.map((p) => p.id).toList());
+        setState(() => _players.clear());
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('All players deleted')),
@@ -434,7 +588,9 @@ class _RosterScreenState extends State<RosterScreen> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+            SnackBar(
+                content: Text('Error: $e'),
+                backgroundColor: Colors.red),
           );
         }
       }
@@ -447,6 +603,12 @@ class _RosterScreenState extends State<RosterScreen> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
+    // Attendance counts derived from the locally loaded pages.
+    final present = _players.where((p) => p.status == 'present').length;
+    final absent = _players.where((p) => p.status == 'absent').length;
+    final late = _players.where((p) => p.status == 'late').length;
+    final excused = _players.where((p) => p.status == 'excused').length;
+
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -454,18 +616,14 @@ class _RosterScreenState extends State<RosterScreen> {
           children: [
             Text(
               '${widget.teamName} Roster',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                  fontSize: 18, fontWeight: FontWeight.bold),
             ),
             if (widget.sport != null && widget.sport!.isNotEmpty)
-              Text(
-                widget.sport!,
-                style: const TextStyle(fontSize: 12),
-              ),
+              Text(widget.sport!, style: const TextStyle(fontSize: 12)),
           ],
         ),
-        // CHANGE (Notes.txt): "Only show the icons" — no text labels on actions.
         actions: [
-          // CHANGE (Notes.txt): Game roster icon is now a clipboard (assignment).
           IconButton(
             icon: const Icon(Icons.assignment),
             tooltip: 'Game Rosters',
@@ -479,8 +637,6 @@ class _RosterScreenState extends State<RosterScreen> {
               ),
             ),
           ),
-
-          // Bulk Actions / Cancel bulk mode — icon only.
           _bulkDeleteMode
               ? IconButton(
                   icon: const Icon(Icons.close),
@@ -495,8 +651,6 @@ class _RosterScreenState extends State<RosterScreen> {
                   tooltip: 'Bulk Actions',
                   onPressed: _showBulkActions,
                 ),
-
-          // Three-dot overflow.
           IconButton(
             icon: const Icon(Icons.more_vert),
             tooltip: 'More options',
@@ -505,328 +659,388 @@ class _RosterScreenState extends State<RosterScreen> {
         ],
       ),
 
-      // ── Player list ───────────────────────────────────────────────────────
-      body: StreamBuilder<List<Player>>(
-        stream: _playerService.getPlayerStream(widget.teamId),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.error_outline, size: 48, color: Colors.red),
-                  const SizedBox(height: 16),
-                  Text('Error: ${snapshot.error}'),
-                  ElevatedButton(
-                    onPressed: () => setState(() {}),
-                    child: const Text('Retry'),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
-          final players = snapshot.data ?? [];
-
-          if (players.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.people_outline,
-                      size: 64, color: Colors.grey[400]),
-                  const SizedBox(height: 16),
-                  const Text('No players yet',
-                      style: TextStyle(
-                          fontSize: 20, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  Text('Tap + to add your first player!',
-                      style: TextStyle(color: Colors.grey[600])),
-                ],
-              ),
-            );
-          }
-
-          final present = players.where((p) => p.status == 'present').length;
-          final absent = players.where((p) => p.status == 'absent').length;
-          final late = players.where((p) => p.status == 'late').length;
-          final excused = players.where((p) => p.status == 'excused').length;
-
-          return Column(
-            children: [
-              // ── Summary card ──────────────────────────────────────────────
-              Card(
-                margin: const EdgeInsets.all(16),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _summaryItem('Present', present, Colors.green),
-                      _summaryItem('Absent', absent, Colors.red),
-                      _summaryItem('Late', late, Colors.orange),
-                      _summaryItem(
-                          'Excused', excused, colorScheme.primary),
-                    ],
-                  ),
-                ),
-              ),
-
-              // ── Bulk-delete info bar ──────────────────────────────────────
-              if (_bulkDeleteMode)
-                Container(
-                  color: Colors.red[50],
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 8),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.info_outline,
-                          color: Colors.red, size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          '${_selectedIds.length} of ${players.length} selected',
-                          style: const TextStyle(color: Colors.red),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () => setState(() {
-                          if (_selectedIds.length == players.length) {
-                            _selectedIds.clear();
-                          } else {
-                            _selectedIds
-                                .addAll(players.map((p) => p.id));
-                          }
-                        }),
-                        child: Text(
-                          _selectedIds.length == players.length
-                              ? 'Deselect All'
-                              : 'Select All',
-                        ),
-                      ),
-                    ],
+      // ── Body ──────────────────────────────────────────────────────────────
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                // ── Summary card ───────────────────────────────────────────
+                Card(
+                  margin: const EdgeInsets.all(16),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _summaryItem('Present', present, Colors.green),
+                        _summaryItem('Absent', absent, Colors.red),
+                        _summaryItem('Late', late, Colors.orange),
+                        _summaryItem('Excused', excused, colorScheme.primary),
+                      ],
+                    ),
                   ),
                 ),
 
-              // ── Player list ───────────────────────────────────────────────
-              Expanded(
-                child: ListView.builder(
-                  itemCount: players.length,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  itemBuilder: (ctx, i) {
-                    final player = players[i];
-                    final isChecked = _selectedIds.contains(player.id);
-
-                    // Bulk delete mode — checkboxes.
-                    if (_bulkDeleteMode) {
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        child: ListTile(
-                          leading: _playerAvatar(player, colorScheme),
-                          title: Text(player.name,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold)),
-                          subtitle: _buildSubtitle(player),
-                          trailing: Checkbox(
-                            value: isChecked,
-                            activeColor: Colors.red,
-                            onChanged: (v) => setState(() {
-                              if (v == true) {
-                                _selectedIds.add(player.id);
-                              } else {
-                                _selectedIds.remove(player.id);
-                              }
-                            }),
+                // ── Bulk-delete info bar ───────────────────────────────────
+                if (_bulkDeleteMode)
+                  Container(
+                    color: Colors.red[50],
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 8),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline,
+                            color: Colors.red, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '${_selectedIds.length} of '
+                            '${_players.length} selected',
+                            style: const TextStyle(color: Colors.red),
                           ),
-                          onTap: () => setState(() {
-                            if (isChecked) {
-                              _selectedIds.remove(player.id);
+                        ),
+                        TextButton(
+                          onPressed: () => setState(() {
+                            if (_selectedIds.length == _players.length) {
+                              _selectedIds.clear();
                             } else {
-                              _selectedIds.add(player.id);
+                              _selectedIds
+                                  .addAll(_players.map((p) => p.id));
                             }
                           }),
+                          child: Text(
+                            _selectedIds.length == _players.length
+                                ? 'Deselect All'
+                                : 'Select All',
+                          ),
                         ),
-                      );
-                    }
+                      ],
+                    ),
+                  ),
 
-                    // Normal player tile with swipe-to-delete.
-                    return Dismissible(
-                      key: Key(player.id),
-                      direction: DismissDirection.endToStart,
-                      confirmDismiss: (_) async => showDialog<bool>(
-                        context: context,
-                        builder: (ctx) => AlertDialog(
-                          title: const Text('Delete Player'),
-                          content: Text(
-                              'Remove ${player.name} from the roster?'),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(ctx, false),
-                              child: const Text('Cancel'),
-                            ),
-                            FilledButton(
-                              onPressed: () => Navigator.pop(ctx, true),
-                              style: FilledButton.styleFrom(
-                                  backgroundColor: Colors.red),
-                              child: const Text('Delete'),
-                            ),
-                          ],
-                        ),
-                      ),
-                      background: Container(
-                        color: Colors.red,
-                        alignment: Alignment.centerRight,
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 20),
-                        child: const Icon(Icons.delete,
-                            color: Colors.white, size: 32),
-                      ),
-                      onDismissed: (_) async {
-                        try {
-                          await _playerService.deletePlayer(player.id);
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                  content: Text(
-                                      '${player.name} removed')),
-                            );
-                          }
-                        } catch (e) {
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                  content: Text('Error removing: $e'),
-                                  backgroundColor: Colors.red),
-                            );
-                          }
-                        }
-                      },
-                      child: Card(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        child: ListTile(
-                          leading: _playerAvatar(player, colorScheme),
-                          title: Text(player.name,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold)),
-                          subtitle: _buildSubtitle(player),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
+                // ── Player list (paginated) ────────────────────────────────
+                Expanded(
+                  child: _players.isEmpty && !_hasMore
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              // Quick present/absent toggle.
-                              IconButton(
-                                icon: Icon(
-                                  player.status == 'present'
-                                      ? Icons.check_circle
-                                      : Icons.circle_outlined,
-                                  color: player.status == 'present'
-                                      ? Colors.green
-                                      : Colors.grey,
-                                  size: 28,
-                                ),
-                                onPressed: () async {
-                                  final ns = player.status == 'present'
-                                      ? 'absent'
-                                      : 'present';
-                                  await _updatePlayerStatus(player, ns);
-                                },
-                                tooltip: player.status == 'present'
-                                    ? 'Mark Absent'
-                                    : 'Mark Present',
-                              ),
-                              PopupMenuButton<String>(
-                                icon: const Icon(Icons.more_vert),
-                                onSelected: (v) async {
-                                  if (v == 'status') {
-                                    await _showStatusMenu(player);
-                                  } else if (v == 'edit') {
-                                    await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) => AddPlayerScreen(
-                                          teamId: widget.teamId,
-                                          playerToEdit: player,
-                                        ),
-                                      ),
-                                    );
-                                    if (mounted) setState(() {});
-                                  } else if (v == 'delete') {
-                                    final ok = await showDialog<bool>(
-                                      context: context,
-                                      builder: (ctx) => AlertDialog(
-                                        title:
-                                            const Text('Delete Player'),
-                                        content: Text(
-                                            'Remove ${player.name}?'),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.pop(ctx, false),
-                                            child: const Text('Cancel'),
-                                          ),
-                                          FilledButton(
-                                            onPressed: () =>
-                                                Navigator.pop(ctx, true),
-                                            style: FilledButton.styleFrom(
-                                                backgroundColor:
-                                                    Colors.red),
-                                            child: const Text('Delete'),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                    if (ok == true && mounted) {
-                                      await _playerService
-                                          .deletePlayer(player.id);
-                                    }
-                                  }
-                                },
-                                itemBuilder: (_) => const [
-                                  PopupMenuItem(
-                                    value: 'status',
-                                    child: Row(children: [
-                                      Icon(Icons.event_available, size: 20),
-                                      SizedBox(width: 12),
-                                      Text('Change Status'),
-                                    ]),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'edit',
-                                    child: Row(children: [
-                                      Icon(Icons.edit, size: 20),
-                                      SizedBox(width: 12),
-                                      Text('Edit Player'),
-                                    ]),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'delete',
-                                    child: Row(children: [
-                                      Icon(Icons.delete,
-                                          color: Colors.red, size: 20),
-                                      SizedBox(width: 12),
-                                      Text('Delete',
-                                          style: TextStyle(
-                                              color: Colors.red)),
-                                    ]),
-                                  ),
-                                ],
-                              ),
+                              Icon(Icons.people_outline,
+                                  size: 64, color: Colors.grey[400]),
+                              const SizedBox(height: 16),
+                              const Text('No players yet',
+                                  style: TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 8),
+                              Text('Tap + to add your first player!',
+                                  style:
+                                      TextStyle(color: Colors.grey[600])),
                             ],
                           ),
-                          onTap: () => _showPlayerDetails(player),
+                        )
+                      : RefreshIndicator(
+                          // Pull-to-refresh resets to page 0.
+                          onRefresh: _loadFirstPage,
+                          child: ListView.builder(
+                            controller: _scrollController,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16),
+                            // +1 item slot used for the loading spinner.
+                            itemCount: _players.length + 1,
+                            itemBuilder: (ctx, i) {
+                              // Last slot: loading spinner or end indicator.
+                              if (i == _players.length) {
+                                if (_isPaginating) {
+                                  return const Padding(
+                                    padding: EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    child: Center(
+                                        child: CircularProgressIndicator()),
+                                  );
+                                }
+                                if (!_hasMore && _players.isNotEmpty) {
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    child: Center(
+                                      child: Text(
+                                        'All ${_players.length} players loaded',
+                                        style: TextStyle(
+                                            color: Colors.grey[500],
+                                            fontSize: 12),
+                                      ),
+                                    ),
+                                  );
+                                }
+                                return const SizedBox.shrink();
+                              }
+
+                              final player = _players[i];
+                              final isChecked =
+                                  _selectedIds.contains(player.id);
+
+                              // ── Bulk delete mode ─────────────────────
+                              if (_bulkDeleteMode) {
+                                return Card(
+                                  margin:
+                                      const EdgeInsets.only(bottom: 8),
+                                  child: ListTile(
+                                    leading: _playerAvatar(
+                                        player, colorScheme),
+                                    title: Text(player.name,
+                                        style: const TextStyle(
+                                            fontWeight:
+                                                FontWeight.bold)),
+                                    subtitle:
+                                        _buildSubtitle(player),
+                                    trailing: Checkbox(
+                                      value: isChecked,
+                                      activeColor: Colors.red,
+                                      onChanged: (v) => setState(() {
+                                        if (v == true) {
+                                          _selectedIds.add(player.id);
+                                        } else {
+                                          _selectedIds
+                                              .remove(player.id);
+                                        }
+                                      }),
+                                    ),
+                                    onTap: () => setState(() {
+                                      if (isChecked) {
+                                        _selectedIds.remove(player.id);
+                                      } else {
+                                        _selectedIds.add(player.id);
+                                      }
+                                    }),
+                                  ),
+                                );
+                              }
+
+                              // ── Normal tile with swipe-to-delete ─────
+                              return Dismissible(
+                                key: Key(player.id),
+                                direction: DismissDirection.endToStart,
+                                confirmDismiss: (_) async =>
+                                    showDialog<bool>(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    title:
+                                        const Text('Delete Player'),
+                                    content: Text(
+                                        'Remove ${player.name} from the roster?'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, false),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      FilledButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx, true),
+                                        style: FilledButton.styleFrom(
+                                            backgroundColor:
+                                                Colors.red),
+                                        child: const Text('Delete'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                background: Container(
+                                  color: Colors.red,
+                                  alignment: Alignment.centerRight,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 20),
+                                  child: const Icon(Icons.delete,
+                                      color: Colors.white, size: 32),
+                                ),
+                                onDismissed: (_) async {
+                                  try {
+                                    await _playerService
+                                        .deletePlayer(player.id);
+                                    _removeLocalPlayer(player.id);
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                            content: Text(
+                                                '${player.name} removed')),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                            content: Text(
+                                                'Error removing: $e'),
+                                            backgroundColor:
+                                                Colors.red),
+                                      );
+                                    }
+                                    // Re-insert on failure to avoid blank entry.
+                                    setState(() =>
+                                        _players.insert(i, player));
+                                  }
+                                },
+                                child: Card(
+                                  margin:
+                                      const EdgeInsets.only(bottom: 8),
+                                  child: ListTile(
+                                    leading: _playerAvatar(
+                                        player, colorScheme),
+                                    title: Text(player.name,
+                                        style: const TextStyle(
+                                            fontWeight:
+                                                FontWeight.bold)),
+                                    subtitle:
+                                        _buildSubtitle(player),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        // Quick present/absent toggle.
+                                        IconButton(
+                                          icon: Icon(
+                                            player.status == 'present'
+                                                ? Icons.check_circle
+                                                : Icons.circle_outlined,
+                                            color:
+                                                player.status == 'present'
+                                                    ? Colors.green
+                                                    : Colors.grey,
+                                            size: 28,
+                                          ),
+                                          onPressed: () async {
+                                            final ns =
+                                                player.status == 'present'
+                                                    ? 'absent'
+                                                    : 'present';
+                                            await _updatePlayerStatus(
+                                                player, ns);
+                                          },
+                                          tooltip:
+                                              player.status == 'present'
+                                                  ? 'Mark Absent'
+                                                  : 'Mark Present',
+                                        ),
+                                        PopupMenuButton<String>(
+                                          icon: const Icon(
+                                              Icons.more_vert),
+                                          onSelected: (v) async {
+                                            if (v == 'status') {
+                                              await _showStatusMenu(
+                                                  player);
+                                            } else if (v == 'edit') {
+                                              final result =
+                                                  await Navigator.push<
+                                                      bool>(
+                                                context,
+                                                MaterialPageRoute(
+                                                  builder: (_) =>
+                                                      AddPlayerScreen(
+                                                    teamId: widget.teamId,
+                                                    playerToEdit: player,
+                                                  ),
+                                                ),
+                                              );
+                                              // If edit was saved, reload
+                                              // the full first page so
+                                              // position changes appear.
+                                              if (result == true &&
+                                                  mounted) {
+                                                _loadFirstPage();
+                                              }
+                                            } else if (v == 'delete') {
+                                              final ok =
+                                                  await showDialog<bool>(
+                                                context: context,
+                                                builder: (ctx) =>
+                                                    AlertDialog(
+                                                  title: const Text(
+                                                      'Delete Player'),
+                                                  content: Text(
+                                                      'Remove ${player.name}?'),
+                                                  actions: [
+                                                    TextButton(
+                                                      onPressed: () =>
+                                                          Navigator.pop(
+                                                              ctx, false),
+                                                      child: const Text(
+                                                          'Cancel'),
+                                                    ),
+                                                    FilledButton(
+                                                      onPressed: () =>
+                                                          Navigator.pop(
+                                                              ctx, true),
+                                                      style: FilledButton
+                                                          .styleFrom(
+                                                              backgroundColor:
+                                                                  Colors
+                                                                      .red),
+                                                      child: const Text(
+                                                          'Delete'),
+                                                    ),
+                                                  ],
+                                                ),
+                                              );
+                                              if (ok == true &&
+                                                  mounted) {
+                                                await _playerService
+                                                    .deletePlayer(
+                                                        player.id);
+                                                _removeLocalPlayer(
+                                                    player.id);
+                                              }
+                                            }
+                                          },
+                                          itemBuilder: (_) => const [
+                                            PopupMenuItem(
+                                              value: 'status',
+                                              child: Row(children: [
+                                                Icon(
+                                                    Icons.event_available,
+                                                    size: 20),
+                                                SizedBox(width: 12),
+                                                Text('Change Status'),
+                                              ]),
+                                            ),
+                                            PopupMenuItem(
+                                              value: 'edit',
+                                              child: Row(children: [
+                                                Icon(Icons.edit,
+                                                    size: 20),
+                                                SizedBox(width: 12),
+                                                Text('Edit Player'),
+                                              ]),
+                                            ),
+                                            PopupMenuItem(
+                                              value: 'delete',
+                                              child: Row(children: [
+                                                Icon(Icons.delete,
+                                                    color: Colors.red,
+                                                    size: 20),
+                                                SizedBox(width: 12),
+                                                Text('Delete',
+                                                    style: TextStyle(
+                                                        color:
+                                                            Colors.red)),
+                                              ]),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                    onTap: () =>
+                                        _showPlayerDetails(player),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                         ),
-                      ),
-                    );
-                  },
                 ),
-              ),
-            ],
-          );
-        },
-      ),
+              ],
+            ),
 
       // ── FAB ──────────────────────────────────────────────────────────────
       floatingActionButton: _bulkDeleteMode
@@ -842,14 +1056,15 @@ class _RosterScreenState extends State<RosterScreen> {
             )
           : FloatingActionButton.extended(
               onPressed: () async {
-                await Navigator.push(
+                final result = await Navigator.push<bool>(
                   context,
                   MaterialPageRoute(
                     builder: (_) =>
                         AddPlayerScreen(teamId: widget.teamId),
                   ),
                 );
-                if (mounted) setState(() {});
+                // After adding, reload from page 0 so the new player appears.
+                if (result == true && mounted) _loadFirstPage();
               },
               icon: const Icon(Icons.person_add),
               label: const Text('Add Player'),
@@ -867,7 +1082,8 @@ class _RosterScreenState extends State<RosterScreen> {
           child: Text(
             player.displayJersey,
             style: TextStyle(
-                fontWeight: FontWeight.bold, color: cs.onPrimaryContainer),
+                fontWeight: FontWeight.bold,
+                color: cs.onPrimaryContainer),
           ),
         ),
         Positioned(
@@ -892,15 +1108,24 @@ class _RosterScreenState extends State<RosterScreen> {
       children: [
         Text(count.toString(),
             style: TextStyle(
-                fontSize: 24, fontWeight: FontWeight.bold, color: color)),
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: color)),
         const SizedBox(height: 4),
-        Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+        Text(label,
+            style:
+                TextStyle(fontSize: 12, color: Colors.grey[600])),
       ],
     );
   }
 
+  /// CHANGE (v1.4): Now includes position in the subtitle.
   Widget _buildSubtitle(Player player) {
     final parts = <String>[];
+    // CHANGE (v1.4): show position first if present.
+    if (player.position != null && player.position!.isNotEmpty) {
+      parts.add(player.position!);
+    }
     if (player.nickname != null && player.nickname!.isNotEmpty) {
       parts.add('"${player.nickname}"');
     }
@@ -928,6 +1153,9 @@ class _RosterScreenState extends State<RosterScreen> {
           children: [
             if (player.jerseyNumber != null)
               _detailRow('Jersey', player.jerseyNumber!),
+            // CHANGE (v1.4): show position in detail dialog.
+            if (player.position != null && player.position!.isNotEmpty)
+              _detailRow('Position', player.position!),
             if (player.nickname != null && player.nickname!.isNotEmpty)
               _detailRow('Nickname', player.nickname!),
             if (player.studentId != null && player.studentId!.isNotEmpty)
@@ -953,7 +1181,7 @@ class _RosterScreenState extends State<RosterScreen> {
           FilledButton.icon(
             onPressed: () async {
               Navigator.pop(ctx);
-              await Navigator.push(
+              final result = await Navigator.push<bool>(
                 context,
                 MaterialPageRoute(
                   builder: (_) => AddPlayerScreen(
@@ -962,7 +1190,7 @@ class _RosterScreenState extends State<RosterScreen> {
                   ),
                 ),
               );
-              if (mounted) setState(() {});
+              if (result == true && mounted) _loadFirstPage();
             },
             icon: const Icon(Icons.edit),
             label: const Text('Edit'),
@@ -981,7 +1209,8 @@ class _RosterScreenState extends State<RosterScreen> {
           SizedBox(
               width: 100,
               child: Text('$label:',
-                  style: const TextStyle(fontWeight: FontWeight.bold))),
+                  style:
+                      const TextStyle(fontWeight: FontWeight.bold))),
           Expanded(child: Text(value)),
         ],
       ),
