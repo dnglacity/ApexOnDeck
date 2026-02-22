@@ -1,13 +1,18 @@
 import 'package:flutter/material.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// player.dart  (AOD v1.4)
+// player.dart  (AOD v1.5)
 //
-// CHANGE (Notes.txt v1.4): Added `position` field.
-//   • Stored as a nullable String in the DB column `position` on the
-//     `players` table (see migration script add_position_column.sql).
-//   • Exposed via toMap() so AddPlayerScreen can persist it.
-//   • Added displayPosition getter for safe display fallback.
+// CHANGE (Notes.txt v1.5 — Unified users):
+//   Added `userId` field (nullable FK → public.users.id).
+//   This replaces the old player_accounts join table.  When a player signs up
+//   and their account is linked, this column is populated directly on the
+//   players row.  The team_members row for that user is set to role='player'
+//   with player_id pointing to this row.
+//
+// Retained from v1.4:
+//   • position field and displayPosition getter.
+//   • All status helpers and copy/toMap/fromMap.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class Player {
@@ -18,15 +23,17 @@ class Player {
   final String? studentEmail;
   final String? jerseyNumber;
   final String? nickname;
-
-  // CHANGE (v1.4): New position field — nullable, optional.
-  // Examples: "Point Guard", "Pitcher", "Center Back", "QB".
   final String? position;
+
+  // CHANGE (v1.5): Direct link to public.users.id.
+  // Replaces the old player_accounts join table.
+  // Null when the player has not yet been linked to an app account.
+  final String? userId;
 
   final String status;
   final DateTime? createdAt;
 
-  Player({
+  const Player({
     required this.id,
     required this.teamId,
     required this.name,
@@ -34,7 +41,8 @@ class Player {
     this.studentEmail,
     this.jerseyNumber,
     this.nickname,
-    this.position,          // CHANGE (v1.4)
+    this.position,
+    this.userId,           // CHANGE (v1.5)
     this.status = 'present',
     this.createdAt,
   });
@@ -42,17 +50,18 @@ class Player {
   // ── Deserialise from Supabase row ──────────────────────────────────────────
   factory Player.fromMap(Map<String, dynamic> map) {
     return Player(
-      id: map['id'] ?? '',
-      teamId: map['team_id'] ?? '',
-      name: map['name'] ?? '',
-      studentId: map['student_id'],
-      studentEmail: map['student_email'],
+      id: map['id'] as String? ?? '',
+      teamId: map['team_id'] as String? ?? '',
+      name: map['name'] as String? ?? '',
+      studentId: map['student_id'] as String?,
+      studentEmail: map['student_email'] as String?,
       jerseyNumber: map['jersey_number']?.toString(),
-      nickname: map['nickname'],
-      position: map['position'],   // CHANGE (v1.4)
-      status: map['status'] ?? 'present',
+      nickname: map['nickname'] as String?,
+      position: map['position'] as String?,
+      userId: map['user_id'] as String?,   // CHANGE (v1.5)
+      status: map['status'] as String? ?? 'present',
       createdAt: map['created_at'] != null
-          ? DateTime.parse(map['created_at'])
+          ? DateTime.tryParse(map['created_at'] as String)
           : null,
     );
   }
@@ -66,7 +75,8 @@ class Player {
       'student_email': studentEmail,
       'jersey_number': jerseyNumber,
       'nickname': nickname,
-      'position': position,         // CHANGE (v1.4)
+      'position': position,
+      'user_id': userId,       // CHANGE (v1.5)
       'status': status,
     };
   }
@@ -80,7 +90,8 @@ class Player {
     String? studentEmail,
     String? jerseyNumber,
     String? nickname,
-    String? position,             // CHANGE (v1.4)
+    String? position,
+    String? userId,            // CHANGE (v1.5)
     String? status,
     DateTime? createdAt,
   }) {
@@ -92,7 +103,8 @@ class Player {
       studentEmail: studentEmail ?? this.studentEmail,
       jerseyNumber: jerseyNumber ?? this.jerseyNumber,
       nickname: nickname ?? this.nickname,
-      position: position ?? this.position,   // CHANGE (v1.4)
+      position: position ?? this.position,
+      userId: userId ?? this.userId,       // CHANGE (v1.5)
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
     );
@@ -104,8 +116,10 @@ class Player {
 
   String get displayName => nickname != null ? '$name ($nickname)' : name;
 
-  /// CHANGE (v1.4): Returns position label, or dash if unset.
   String get displayPosition => position?.isNotEmpty == true ? position! : '-';
+
+  /// True when this player row is linked to an app account.
+  bool get hasLinkedAccount => userId != null && userId!.isNotEmpty;
 
   // ── Status helpers ─────────────────────────────────────────────────────────
 
@@ -140,6 +154,7 @@ class Player {
   }
 
   String get statusLabel {
+    if (status.isEmpty) return 'Unknown';
     return status[0].toUpperCase() + status.substring(1);
   }
 }

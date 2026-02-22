@@ -1,20 +1,25 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter/foundation.dart';
 
-/// AuthService — wraps Supabase Auth operations with error handling.
-///
-/// BUG FIX (Bug 5): The organization update after sign-up used a hard-coded
-/// 500ms delay to wait for the DB trigger to create the coach profile.
-/// On slow connections or a busy DB, 500ms is not enough and the update
-/// silently fails with no user-visible indication.
-/// Fix: Replace the fixed delay with a retry loop (up to 5 attempts, 300ms
-/// apart) that polls until the coach row exists before updating.
+// ─────────────────────────────────────────────────────────────────────────────
+// auth_service.dart  (AOD v1.5)
+//
+// CHANGE (Notes.txt v1.5 — Unified users):
+//   All references to the `coaches` table are replaced with the `users` table.
+//   The DB trigger `on_auth_user_created` now inserts into `users` (not
+//   `coaches`).  The retry helper polls `users` instead of `coaches`.
+//
+//   getCurrentUser() returns an AppUser (from the `users` table).
+//   The concept of "getting the current coach" is gone — there is only a user,
+//   whose role is determined per-team from the `team_members` table.
+// ─────────────────────────────────────────────────────────────────────────────
+
 class AuthService {
   final _supabase = Supabase.instance.client;
 
   // ── Getters ───────────────────────────────────────────────────────────────
 
-  /// The currently authenticated Supabase user, or null if not signed in.
+  /// The currently authenticated Supabase auth user, or null if not signed in.
   User? get currentUser => _supabase.auth.currentUser;
 
   /// True when a user is currently signed in.
@@ -23,21 +28,19 @@ class AuthService {
   // ── Sign Up ───────────────────────────────────────────────────────────────
 
   /// Creates a new auth user and waits for the DB trigger to create the
-  /// corresponding `coaches` row, then updates `organization` if provided.
+  /// corresponding `users` row, then updates `organization` if provided.
   ///
-  /// The database trigger `on_auth_user_created` is expected to insert into
-  /// `coaches` using the `name` value from `raw_user_meta_data`.
+  /// The DB trigger `on_auth_user_created` inserts into `public.users`
+  /// using `name` and `email` from raw_user_meta_data / auth.users.
   ///
-  /// BUG FIX (Bug 5): Replaced `Future.delayed(500ms)` with a polling loop
-  /// that retries up to [_maxTriggerRetries] times at [_triggerRetryDelay]
-  /// intervals. This is resilient to slow connections and busy databases.
+  /// BUG FIX (Bug 5 — retained from v1.4): Polling retry instead of fixed delay.
   Future<AuthResponse> signUp({
     required String email,
     required String password,
     required String name,
     String? organization,
   }) async {
-    // Create the auth user. The DB trigger will create the coaches row.
+    // Create the auth user. The DB trigger creates the public.users row.
     final response = await _supabase.auth.signUp(
       email: email,
       password: password,
@@ -47,8 +50,8 @@ class AuthService {
       },
     );
 
-    // If an organization was provided, update the coaches row once the
-    // DB trigger has had time to create it.
+    // If an organization was provided, update the users row once the trigger
+    // has created it.
     if (response.user != null &&
         organization != null &&
         organization.isNotEmpty) {
@@ -58,49 +61,41 @@ class AuthService {
     return response;
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ── Organization update retry ─────────────────────────────────────────────
 
-  /// Number of times to poll for the coaches row before giving up.
   static const int _maxTriggerRetries = 5;
-
-  /// Delay between each polling attempt.
   static const Duration _triggerRetryDelay = Duration(milliseconds: 300);
 
-  /// Polls until the `coaches` row for [userId] exists, then writes
-  /// [organization] to it.
+  /// Polls until the `users` row for [authUserId] exists (created by the DB
+  /// trigger), then writes [organization] to it.
   ///
-  /// If the row never appears within [_maxTriggerRetries] attempts, the
-  /// failure is logged but NOT rethrown — sign-up was still successful and
-  /// the user can update their organization from a profile screen later.
+  /// Failure is non-fatal — sign-up was still successful.
   Future<void> _updateOrganizationWithRetry(
-      String userId, String organization) async {
+      String authUserId, String organization) async {
     for (int attempt = 1; attempt <= _maxTriggerRetries; attempt++) {
       await Future.delayed(_triggerRetryDelay);
       try {
-        // Check whether the trigger has created the coaches row yet.
+        // CHANGE (v1.5): poll `users` table instead of `coaches`.
         final existing = await _supabase
-            .from('coaches')
+            .from('users')
             .select('id')
-            .eq('user_id', userId)
+            .eq('user_id', authUserId)
             .maybeSingle();
 
         if (existing != null) {
-          // Row exists — write the organization.
+          // Row exists — write the organization field.
           await _supabase
-              .from('coaches')
-              .update({'organization': organization}).eq('user_id', userId);
-          return; // Success — stop retrying.
+              .from('users')
+              .update({'organization': organization})
+              .eq('user_id', authUserId);
+          return;
         }
       } catch (e) {
-        // Log but continue to next attempt.
         debugPrint('⚠️ Organization update attempt $attempt failed: $e');
       }
     }
-
-    // All attempts exhausted — log a warning. The sign-up is still valid.
     debugPrint(
-        '⚠️ Could not update organization after $_maxTriggerRetries attempts. '
-        'The coaches trigger may not have run yet.');
+        '⚠️ Could not update organization after $_maxTriggerRetries attempts.');
   }
 
   // ── Sign In ───────────────────────────────────────────────────────────────
@@ -118,21 +113,21 @@ class AuthService {
 
   // ── Profile ───────────────────────────────────────────────────────────────
 
-  /// Returns the `coaches` row for the currently signed-in user, or null.
-  Future<Map<String, dynamic>?> getCurrentCoach() async {
+  /// Returns the raw `users` map for the currently signed-in user, or null.
+  ///
+  /// CHANGE (v1.5): Queries `users` table (was `coaches`).
+  Future<Map<String, dynamic>?> getCurrentUserProfile() async {
     try {
-      final userId = currentUser?.id;
-      if (userId == null) return null;
+      final authUser = currentUser;
+      if (authUser == null) return null;
 
-      final response = await _supabase
-          .from('coaches')
+      return await _supabase
+          .from('users')
           .select()
-          .eq('user_id', userId)
+          .eq('user_id', authUser.id)
           .single();
-
-      return response;
     } catch (e) {
-      debugPrint('Get coach error: $e');
+      debugPrint('Get user profile error: $e');
       return null;
     }
   }

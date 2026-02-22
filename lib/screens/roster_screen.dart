@@ -1,46 +1,23 @@
 import 'package:flutter/material.dart';
-import 'package:sweatdex/models/player.dart';
+import '../models/player.dart';
 import '../services/player_service.dart';
 import '../services/auth_service.dart';
 import 'add_player_screen.dart';
-import 'manage_coaches_screen.dart';
+import 'manage_members_screen.dart';   // CHANGE (v1.5): was manage_coaches_screen
 import 'saved_roster_screen.dart';
 import 'login_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// roster_screen.dart  (AOD v1.4)
+// roster_screen.dart  (AOD v1.5)
 //
-// CHANGE (Notes.txt v1.4 — Pagination with infinite scroll):
-//   The player list is now loaded in pages of [_pageSize] rows using
-//   PlayerService.getPlayersPaginated() which calls Supabase .range().
+// CHANGE (Notes.txt v1.5 — Unified users):
+//   • Accepts [currentUserRole] ('owner'|'coach') from TeamSelectionScreen.
+//   • Owner-only actions: Delete Roster, Team Settings edit/delete.
+//   • Coach actions: Add Player, Change Status, Game Rosters.
+//   • ManageCoachesScreen → ManageMembersScreen.
+//   • Overflow menu "Coach Settings" → "Manage Members".
 //
-//   Implementation:
-//     • _players:       accumulated list across all loaded pages.
-//     • _page:          current page index (0-based).
-//     • _hasMore:       false when a page returns fewer rows than _pageSize.
-//     • _isPaginating:  true while a page fetch is in progress (prevents
-//                       duplicate concurrent fetches).
-//     • _scrollController: fires _loadNextPage() when the user scrolls within
-//                          _scrollThreshold pixels of the bottom.
-//
-//   The attendance summary card (present/absent/late/excused counts) is
-//   derived from the locally accumulated _players list.  This is accurate
-//   for loaded pages; the counts update as new pages load.
-//
-//   Bulk actions (mark all, bulk delete) still use the full getPlayers() /
-//   bulkUpdateStatus() calls so they act on ALL players, not just the
-//   loaded pages.
-//
-//   The real-time StreamBuilder is REPLACED by pagination.  getPlayerStream()
-//   is incompatible with pagination because it returns the full set.
-//   Status updates and deletes refresh the specific tile locally to avoid
-//   a full page reload.
-//
-// CHANGE (Notes.txt v1.4 — Position shown in player subtitle):
-//   The _buildSubtitle() helper now includes the player's `position` field.
-//
-// All pre-existing behaviour (bulk delete, swipe-to-delete, overflow menu,
-// status changes, add/edit, clipboard icon, etc.) is retained unchanged.
+// All v1.4 pagination, position display, and status features retained.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class RosterScreen extends StatefulWidget {
@@ -48,11 +25,16 @@ class RosterScreen extends StatefulWidget {
   final String teamName;
   final String? sport;
 
+  /// CHANGE (v1.5): Role of the currently logged-in user on this team.
+  /// Determines which UI actions are available.
+  final String currentUserRole;
+
   const RosterScreen({
     super.key,
     required this.teamId,
     required this.teamName,
     this.sport,
+    this.currentUserRole = 'coach', // default for backwards safety
   });
 
   @override
@@ -64,25 +46,26 @@ class _RosterScreenState extends State<RosterScreen> {
   final _authService = AuthService();
 
   // ── Pagination state ──────────────────────────────────────────────────────
-  // Number of players to load per page.
   static const int _pageSize = 20;
 
-  List<Player> _players = [];   // accumulated list across all loaded pages
-  int _page = 0;                // next page index to fetch (0-based)
-  bool _hasMore = true;         // becomes false when a page has < _pageSize rows
-  bool _isLoading = true;       // true only on initial load
-  bool _isPaginating = false;   // true while fetching any subsequent page
+  List<Player> _players = [];
+  int _page = 0;
+  bool _hasMore = true;
+  bool _isLoading = true;
+  bool _isPaginating = false;
 
-  // ScrollController drives infinite-scroll detection.
   final ScrollController _scrollController = ScrollController();
-  // Trigger next page when user is this many pixels from the bottom.
   static const double _scrollThreshold = 200;
 
-  // ── Bulk-delete mode ──────────────────────────────────────────────────────
   bool _bulkDeleteMode = false;
   final Set<String> _selectedIds = {};
 
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Role helpers ──────────────────────────────────────────────────────────
+
+  bool get _isOwner => widget.currentUserRole == 'owner';
+  bool get _isCoachOrOwner =>
+      widget.currentUserRole == 'owner' || widget.currentUserRole == 'coach';
+
   @override
   void initState() {
     super.initState();
@@ -97,19 +80,17 @@ class _RosterScreenState extends State<RosterScreen> {
     super.dispose();
   }
 
-  // ── Pagination helpers ────────────────────────────────────────────────────
+  // ── Pagination ────────────────────────────────────────────────────────────
 
-  /// Called by the scroll listener; triggers next page when near the bottom.
   void _onScroll() {
     final pos = _scrollController.position;
-    final atBottom =
-        pos.pixels >= (pos.maxScrollExtent - _scrollThreshold);
-    if (atBottom && _hasMore && !_isPaginating) {
+    if (pos.pixels >= (pos.maxScrollExtent - _scrollThreshold) &&
+        _hasMore &&
+        !_isPaginating) {
       _loadNextPage();
     }
   }
 
-  /// Resets pagination and fetches page 0.
   Future<void> _loadFirstPage() async {
     setState(() {
       _players.clear();
@@ -121,7 +102,6 @@ class _RosterScreenState extends State<RosterScreen> {
     if (mounted) setState(() => _isLoading = false);
   }
 
-  /// Fetches the next sequential page and appends to [_players].
   Future<void> _loadNextPage() async {
     if (!_hasMore || _isPaginating) return;
     setState(() => _isPaginating = true);
@@ -129,7 +109,6 @@ class _RosterScreenState extends State<RosterScreen> {
     if (mounted) setState(() => _isPaginating = false);
   }
 
-  /// Core fetch — reads page [_page] from Supabase via .range().
   Future<void> _fetchPage() async {
     try {
       final from = _page * _pageSize;
@@ -145,7 +124,6 @@ class _RosterScreenState extends State<RosterScreen> {
         setState(() {
           _players.addAll(batch);
           _page++;
-          // If the batch is smaller than a full page, we've reached the end.
           _hasMore = batch.length == _pageSize;
         });
       }
@@ -162,28 +140,15 @@ class _RosterScreenState extends State<RosterScreen> {
 
   // ── Local state helpers ───────────────────────────────────────────────────
 
-  /// Applies a status change locally (avoids a full page reload).
   void _applyLocalStatusChange(String playerId, String newStatus) {
     final idx = _players.indexWhere((p) => p.id == playerId);
     if (idx != -1) {
-      setState(() {
-        _players[idx] = _players[idx].copyWith(status: newStatus);
-      });
+      setState(() => _players[idx] = _players[idx].copyWith(status: newStatus));
     }
   }
 
-  /// Removes a player from the local list after deletion.
   void _removeLocalPlayer(String playerId) {
     setState(() => _players.removeWhere((p) => p.id == playerId));
-  }
-
-  /// Reloads a single player row after an edit.
-  /// Since the paginated list doesn't stream, we refresh only the edited row.
-  void _refreshAfterEdit(Player updated) {
-    final idx = _players.indexWhere((p) => p.id == updated.id);
-    if (idx != -1) {
-      setState(() => _players[idx] = updated);
-    }
   }
 
   // ── Status helpers ────────────────────────────────────────────────────────
@@ -269,12 +234,15 @@ class _RosterScreenState extends State<RosterScreen> {
               title: const Text('Mark All Absent'),
               onTap: () => Navigator.pop(ctx, 'absent'),
             ),
-            ListTile(
-              leading: const Icon(Icons.delete_sweep, color: Colors.red),
-              title: const Text('Bulk Delete',
-                  style: TextStyle(color: Colors.red)),
-              onTap: () => Navigator.pop(ctx, 'bulkDelete'),
-            ),
+            // CHANGE (v1.5): Bulk delete only for owners.
+            if (_isOwner)
+              ListTile(
+                leading:
+                    const Icon(Icons.delete_sweep, color: Colors.red),
+                title: const Text('Bulk Delete',
+                    style: TextStyle(color: Colors.red)),
+                onTap: () => Navigator.pop(ctx, 'bulkDelete'),
+              ),
           ],
         ),
         actions: [
@@ -295,13 +263,9 @@ class _RosterScreenState extends State<RosterScreen> {
       });
     } else {
       try {
-        // Bulk status acts on ALL players, not just loaded pages.
         await _playerService.bulkUpdateStatus(widget.teamId, action);
-        // Refresh locally.
         setState(() {
-          _players = _players
-              .map((p) => p.copyWith(status: action))
-              .toList();
+          _players = _players.map((p) => p.copyWith(status: action)).toList();
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -312,8 +276,7 @@ class _RosterScreenState extends State<RosterScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-                content: Text('Error: $e'),
-                backgroundColor: Colors.red),
+                content: Text('Error: $e'), backgroundColor: Colors.red),
           );
         }
       }
@@ -351,10 +314,8 @@ class _RosterScreenState extends State<RosterScreen> {
                         setLocal(() => acknowledged = v ?? false),
                   ),
                   const Expanded(
-                    child: Text(
-                      'I understand this is irreversible.',
-                      style: TextStyle(fontSize: 13),
-                    ),
+                    child: Text('I understand this is irreversible.',
+                        style: TextStyle(fontSize: 13)),
                   ),
                 ],
               ),
@@ -394,8 +355,7 @@ class _RosterScreenState extends State<RosterScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-                content: Text('Error: $e'),
-                backgroundColor: Colors.red),
+                content: Text('Error: $e'), backgroundColor: Colors.red),
           );
         }
         setState(() {
@@ -406,9 +366,41 @@ class _RosterScreenState extends State<RosterScreen> {
     }
   }
 
-  // ── Three-dot overflow menu ───────────────────────────────────────────────
+  // ── Overflow menu ─────────────────────────────────────────────────────────
 
   void _showOverflowMenu() async {
+    final items = <PopupMenuEntry<String>>[
+      const PopupMenuItem(
+        value: 'manageMembers',
+        child: Row(children: [
+          Icon(Icons.manage_accounts, size: 20),
+          SizedBox(width: 12),
+          // CHANGE (v1.5): renamed from "Coach Settings"
+          Text('Manage Members'),
+        ]),
+      ),
+      const PopupMenuDivider(),
+      // CHANGE (v1.5): Delete Roster only shown to owners.
+      if (_isOwner)
+        const PopupMenuItem(
+          value: 'deleteRoster',
+          child: Row(children: [
+            Icon(Icons.delete_forever, color: Colors.red, size: 20),
+            SizedBox(width: 12),
+            Text('Delete Roster', style: TextStyle(color: Colors.red)),
+          ]),
+        ),
+      const PopupMenuDivider(),
+      const PopupMenuItem(
+        value: 'logout',
+        child: Row(children: [
+          Icon(Icons.logout, size: 20),
+          SizedBox(width: 12),
+          Text('Log Out'),
+        ]),
+      ),
+    ];
+
     final action = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -417,65 +409,27 @@ class _RosterScreenState extends State<RosterScreen> {
         0,
         0,
       ),
-      items: const [
-        PopupMenuItem(
-          value: 'teamSettings',
-          child: Row(children: [
-            Icon(Icons.settings, size: 20),
-            SizedBox(width: 12),
-            Text('Team Settings'),
-          ]),
-        ),
-        PopupMenuItem(
-          value: 'coachSettings',
-          child: Row(children: [
-            Icon(Icons.manage_accounts, size: 20),
-            SizedBox(width: 12),
-            Text('Coach Settings'),
-          ]),
-        ),
-        PopupMenuDivider(),
-        PopupMenuItem(
-          value: 'deleteRoster',
-          child: Row(children: [
-            Icon(Icons.delete_forever, color: Colors.red, size: 20),
-            SizedBox(width: 12),
-            Text('Delete Roster', style: TextStyle(color: Colors.red)),
-          ]),
-        ),
-        PopupMenuDivider(),
-        PopupMenuItem(
-          value: 'logout',
-          child: Row(children: [
-            Icon(Icons.logout, size: 20),
-            SizedBox(width: 12),
-            Text('Log Out'),
-          ]),
-        ),
-      ],
+      items: items,
     );
 
     if (action == null || !mounted) return;
 
     switch (action) {
-      case 'teamSettings':
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Team Settings — coming soon')),
-        );
-        break;
-      case 'coachSettings':
+      case 'manageMembers':
+        // CHANGE (v1.5): Navigate to ManageMembersScreen with role passed in.
         await Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => ManageCoachesScreen(
+            builder: (_) => ManageMembersScreen(
               teamId: widget.teamId,
               teamName: widget.teamName,
+              currentUserRole: widget.currentUserRole,
             ),
           ),
         );
         break;
       case 'deleteRoster':
-        await _confirmDeleteRoster();
+        if (_isOwner) await _confirmDeleteRoster();
         break;
       case 'logout':
         await _performLogout();
@@ -506,6 +460,7 @@ class _RosterScreenState extends State<RosterScreen> {
     if (confirm != true || !mounted) return;
 
     try {
+      _playerService.clearCache();
       await _authService.signOut();
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
@@ -549,10 +504,8 @@ class _RosterScreenState extends State<RosterScreen> {
                         setLocal(() => acknowledged = v ?? false),
                   ),
                   const Expanded(
-                    child: Text(
-                      'I understand all players will be deleted.',
-                      style: TextStyle(fontSize: 13),
-                    ),
+                    child: Text('I understand all players will be deleted.',
+                        style: TextStyle(fontSize: 13)),
                   ),
                 ],
               ),
@@ -589,8 +542,7 @@ class _RosterScreenState extends State<RosterScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-                content: Text('Error: $e'),
-                backgroundColor: Colors.red),
+                content: Text('Error: $e'), backgroundColor: Colors.red),
           );
         }
       }
@@ -603,7 +555,6 @@ class _RosterScreenState extends State<RosterScreen> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    // Attendance counts derived from the locally loaded pages.
     final present = _players.where((p) => p.status == 'present').length;
     final absent = _players.where((p) => p.status == 'absent').length;
     final late = _players.where((p) => p.status == 'late').length;
@@ -658,8 +609,6 @@ class _RosterScreenState extends State<RosterScreen> {
           ),
         ],
       ),
-
-      // ── Body ──────────────────────────────────────────────────────────────
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : Column(
@@ -675,13 +624,13 @@ class _RosterScreenState extends State<RosterScreen> {
                         _summaryItem('Present', present, Colors.green),
                         _summaryItem('Absent', absent, Colors.red),
                         _summaryItem('Late', late, Colors.orange),
-                        _summaryItem('Excused', excused, colorScheme.primary),
+                        _summaryItem(
+                            'Excused', excused, colorScheme.primary),
                       ],
                     ),
                   ),
                 ),
 
-                // ── Bulk-delete info bar ───────────────────────────────────
                 if (_bulkDeleteMode)
                   Container(
                     color: Colors.red[50],
@@ -694,8 +643,7 @@ class _RosterScreenState extends State<RosterScreen> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            '${_selectedIds.length} of '
-                            '${_players.length} selected',
+                            '${_selectedIds.length} of ${_players.length} selected',
                             style: const TextStyle(color: Colors.red),
                           ),
                         ),
@@ -718,7 +666,7 @@ class _RosterScreenState extends State<RosterScreen> {
                     ),
                   ),
 
-                // ── Player list (paginated) ────────────────────────────────
+                // ── Player list ────────────────────────────────────────────
                 Expanded(
                   child: _players.isEmpty && !_hasMore
                       ? Center(
@@ -740,21 +688,18 @@ class _RosterScreenState extends State<RosterScreen> {
                           ),
                         )
                       : RefreshIndicator(
-                          // Pull-to-refresh resets to page 0.
                           onRefresh: _loadFirstPage,
                           child: ListView.builder(
                             controller: _scrollController,
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 16),
-                            // +1 item slot used for the loading spinner.
                             itemCount: _players.length + 1,
                             itemBuilder: (ctx, i) {
-                              // Last slot: loading spinner or end indicator.
                               if (i == _players.length) {
                                 if (_isPaginating) {
                                   return const Padding(
-                                    padding: EdgeInsets.symmetric(
-                                        vertical: 16),
+                                    padding:
+                                        EdgeInsets.symmetric(vertical: 16),
                                     child: Center(
                                         child: CircularProgressIndicator()),
                                   );
@@ -780,7 +725,6 @@ class _RosterScreenState extends State<RosterScreen> {
                               final isChecked =
                                   _selectedIds.contains(player.id);
 
-                              // ── Bulk delete mode ─────────────────────
                               if (_bulkDeleteMode) {
                                 return Card(
                                   margin:
@@ -790,10 +734,8 @@ class _RosterScreenState extends State<RosterScreen> {
                                         player, colorScheme),
                                     title: Text(player.name,
                                         style: const TextStyle(
-                                            fontWeight:
-                                                FontWeight.bold)),
-                                    subtitle:
-                                        _buildSubtitle(player),
+                                            fontWeight: FontWeight.bold)),
+                                    subtitle: _buildSubtitle(player),
                                     trailing: Checkbox(
                                       value: isChecked,
                                       activeColor: Colors.red,
@@ -817,16 +759,17 @@ class _RosterScreenState extends State<RosterScreen> {
                                 );
                               }
 
-                              // ── Normal tile with swipe-to-delete ─────
                               return Dismissible(
                                 key: Key(player.id),
-                                direction: DismissDirection.endToStart,
+                                // CHANGE (v1.5): only coaches/owners can swipe-delete
+                                direction: _isCoachOrOwner
+                                    ? DismissDirection.endToStart
+                                    : DismissDirection.none,
                                 confirmDismiss: (_) async =>
                                     showDialog<bool>(
                                   context: context,
                                   builder: (ctx) => AlertDialog(
-                                    title:
-                                        const Text('Delete Player'),
+                                    title: const Text('Delete Player'),
                                     content: Text(
                                         'Remove ${player.name} from the roster?'),
                                     actions: [
@@ -839,8 +782,7 @@ class _RosterScreenState extends State<RosterScreen> {
                                         onPressed: () =>
                                             Navigator.pop(ctx, true),
                                         style: FilledButton.styleFrom(
-                                            backgroundColor:
-                                                Colors.red),
+                                            backgroundColor: Colors.red),
                                         child: const Text('Delete'),
                                       ),
                                     ],
@@ -861,26 +803,22 @@ class _RosterScreenState extends State<RosterScreen> {
                                     _removeLocalPlayer(player.id);
                                     if (mounted) {
                                       ScaffoldMessenger.of(context)
-                                          .showSnackBar(
-                                        SnackBar(
-                                            content: Text(
-                                                '${player.name} removed')),
-                                      );
+                                          .showSnackBar(SnackBar(
+                                        content: Text(
+                                            '${player.name} removed'),
+                                      ));
                                     }
                                   } catch (e) {
                                     if (mounted) {
                                       ScaffoldMessenger.of(context)
-                                          .showSnackBar(
-                                        SnackBar(
-                                            content: Text(
-                                                'Error removing: $e'),
-                                            backgroundColor:
-                                                Colors.red),
-                                      );
+                                          .showSnackBar(SnackBar(
+                                        content:
+                                            Text('Error removing: $e'),
+                                        backgroundColor: Colors.red,
+                                      ));
                                     }
-                                    // Re-insert on failure to avoid blank entry.
-                                    setState(() =>
-                                        _players.insert(i, player));
+                                    setState(
+                                        () => _players.insert(i, player));
                                   }
                                 },
                                 child: Card(
@@ -891,46 +829,43 @@ class _RosterScreenState extends State<RosterScreen> {
                                         player, colorScheme),
                                     title: Text(player.name,
                                         style: const TextStyle(
-                                            fontWeight:
-                                                FontWeight.bold)),
-                                    subtitle:
-                                        _buildSubtitle(player),
+                                            fontWeight: FontWeight.bold)),
+                                    subtitle: _buildSubtitle(player),
                                     trailing: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        // Quick present/absent toggle.
-                                        IconButton(
-                                          icon: Icon(
-                                            player.status == 'present'
-                                                ? Icons.check_circle
-                                                : Icons.circle_outlined,
-                                            color:
-                                                player.status == 'present'
-                                                    ? Colors.green
-                                                    : Colors.grey,
-                                            size: 28,
-                                          ),
-                                          onPressed: () async {
-                                            final ns =
-                                                player.status == 'present'
-                                                    ? 'absent'
-                                                    : 'present';
-                                            await _updatePlayerStatus(
-                                                player, ns);
-                                          },
-                                          tooltip:
+                                        // Status toggle — all coaches/owners
+                                        if (_isCoachOrOwner)
+                                          IconButton(
+                                            icon: Icon(
                                               player.status == 'present'
-                                                  ? 'Mark Absent'
-                                                  : 'Mark Present',
-                                        ),
+                                                  ? Icons.check_circle
+                                                  : Icons.circle_outlined,
+                                              color: player.status ==
+                                                      'present'
+                                                  ? Colors.green
+                                                  : Colors.grey,
+                                              size: 28,
+                                            ),
+                                            onPressed: () async {
+                                              final ns =
+                                                  player.status == 'present'
+                                                      ? 'absent'
+                                                      : 'present';
+                                              await _updatePlayerStatus(
+                                                  player, ns);
+                                            },
+                                          ),
                                         PopupMenuButton<String>(
                                           icon: const Icon(
                                               Icons.more_vert),
                                           onSelected: (v) async {
-                                            if (v == 'status') {
+                                            if (v == 'status' &&
+                                                _isCoachOrOwner) {
                                               await _showStatusMenu(
                                                   player);
-                                            } else if (v == 'edit') {
+                                            } else if (v == 'edit' &&
+                                                _isCoachOrOwner) {
                                               final result =
                                                   await Navigator.push<
                                                       bool>(
@@ -938,19 +873,19 @@ class _RosterScreenState extends State<RosterScreen> {
                                                 MaterialPageRoute(
                                                   builder: (_) =>
                                                       AddPlayerScreen(
-                                                    teamId: widget.teamId,
-                                                    playerToEdit: player,
+                                                    teamId:
+                                                        widget.teamId,
+                                                    playerToEdit:
+                                                        player,
                                                   ),
                                                 ),
                                               );
-                                              // If edit was saved, reload
-                                              // the full first page so
-                                              // position changes appear.
                                               if (result == true &&
                                                   mounted) {
                                                 _loadFirstPage();
                                               }
-                                            } else if (v == 'delete') {
+                                            } else if (v == 'delete' &&
+                                                _isCoachOrOwner) {
                                               final ok =
                                                   await showDialog<bool>(
                                                 context: context,
@@ -964,7 +899,8 @@ class _RosterScreenState extends State<RosterScreen> {
                                                     TextButton(
                                                       onPressed: () =>
                                                           Navigator.pop(
-                                                              ctx, false),
+                                                              ctx,
+                                                              false),
                                                       child: const Text(
                                                           'Cancel'),
                                                     ),
@@ -983,8 +919,7 @@ class _RosterScreenState extends State<RosterScreen> {
                                                   ],
                                                 ),
                                               );
-                                              if (ok == true &&
-                                                  mounted) {
+                                              if (ok == true && mounted) {
                                                 await _playerService
                                                     .deletePlayer(
                                                         player.id);
@@ -993,39 +928,42 @@ class _RosterScreenState extends State<RosterScreen> {
                                               }
                                             }
                                           },
-                                          itemBuilder: (_) => const [
-                                            PopupMenuItem(
-                                              value: 'status',
-                                              child: Row(children: [
-                                                Icon(
-                                                    Icons.event_available,
-                                                    size: 20),
-                                                SizedBox(width: 12),
-                                                Text('Change Status'),
-                                              ]),
-                                            ),
-                                            PopupMenuItem(
-                                              value: 'edit',
-                                              child: Row(children: [
-                                                Icon(Icons.edit,
-                                                    size: 20),
-                                                SizedBox(width: 12),
-                                                Text('Edit Player'),
-                                              ]),
-                                            ),
-                                            PopupMenuItem(
-                                              value: 'delete',
-                                              child: Row(children: [
-                                                Icon(Icons.delete,
-                                                    color: Colors.red,
-                                                    size: 20),
-                                                SizedBox(width: 12),
-                                                Text('Delete',
-                                                    style: TextStyle(
-                                                        color:
-                                                            Colors.red)),
-                                              ]),
-                                            ),
+                                          itemBuilder: (_) => [
+                                            if (_isCoachOrOwner) ...[
+                                              const PopupMenuItem(
+                                                value: 'status',
+                                                child: Row(children: [
+                                                  Icon(
+                                                      Icons
+                                                          .event_available,
+                                                      size: 20),
+                                                  SizedBox(width: 12),
+                                                  Text('Change Status'),
+                                                ]),
+                                              ),
+                                              const PopupMenuItem(
+                                                value: 'edit',
+                                                child: Row(children: [
+                                                  Icon(Icons.edit,
+                                                      size: 20),
+                                                  SizedBox(width: 12),
+                                                  Text('Edit Player'),
+                                                ]),
+                                              ),
+                                              const PopupMenuItem(
+                                                value: 'delete',
+                                                child: Row(children: [
+                                                  Icon(Icons.delete,
+                                                      color: Colors.red,
+                                                      size: 20),
+                                                  SizedBox(width: 12),
+                                                  Text('Delete',
+                                                      style: TextStyle(
+                                                          color:
+                                                              Colors.red)),
+                                                ]),
+                                              ),
+                                            ],
                                           ],
                                         ),
                                       ],
@@ -1041,34 +979,35 @@ class _RosterScreenState extends State<RosterScreen> {
                 ),
               ],
             ),
-
-      // ── FAB ──────────────────────────────────────────────────────────────
       floatingActionButton: _bulkDeleteMode
-          ? FloatingActionButton.extended(
-              onPressed: _confirmBulkDelete,
-              backgroundColor: Colors.red,
-              icon: const Icon(Icons.delete),
-              label: Text(
-                _selectedIds.isEmpty
-                    ? 'Delete'
-                    : 'Delete (${_selectedIds.length})',
-              ),
-            )
-          : FloatingActionButton.extended(
-              onPressed: () async {
-                final result = await Navigator.push<bool>(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) =>
-                        AddPlayerScreen(teamId: widget.teamId),
+          ? (_isOwner
+              ? FloatingActionButton.extended(
+                  onPressed: _confirmBulkDelete,
+                  backgroundColor: Colors.red,
+                  icon: const Icon(Icons.delete),
+                  label: Text(
+                    _selectedIds.isEmpty
+                        ? 'Delete'
+                        : 'Delete (${_selectedIds.length})',
                   ),
-                );
-                // After adding, reload from page 0 so the new player appears.
-                if (result == true && mounted) _loadFirstPage();
-              },
-              icon: const Icon(Icons.person_add),
-              label: const Text('Add Player'),
-            ),
+                )
+              : null)
+          : (_isCoachOrOwner
+              ? FloatingActionButton.extended(
+                  onPressed: () async {
+                    final result = await Navigator.push<bool>(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            AddPlayerScreen(teamId: widget.teamId),
+                      ),
+                    );
+                    if (result == true && mounted) _loadFirstPage();
+                  },
+                  icon: const Icon(Icons.person_add),
+                  label: const Text('Add Player'),
+                )
+              : null),
     );
   }
 
@@ -1113,16 +1052,13 @@ class _RosterScreenState extends State<RosterScreen> {
                 color: color)),
         const SizedBox(height: 4),
         Text(label,
-            style:
-                TextStyle(fontSize: 12, color: Colors.grey[600])),
+            style: TextStyle(fontSize: 12, color: Colors.grey[600])),
       ],
     );
   }
 
-  /// CHANGE (v1.4): Now includes position in the subtitle.
   Widget _buildSubtitle(Player player) {
     final parts = <String>[];
-    // CHANGE (v1.4): show position first if present.
     if (player.position != null && player.position!.isNotEmpty) {
       parts.add(player.position!);
     }
@@ -1132,11 +1068,13 @@ class _RosterScreenState extends State<RosterScreen> {
     if (player.studentId != null && player.studentId!.isNotEmpty) {
       parts.add('ID: ${player.studentId}');
     }
+    // CHANGE (v1.5): Show account link indicator
+    if (player.hasLinkedAccount) {
+      parts.add('✓ Linked');
+    }
     if (parts.isEmpty) {
-      return Text(
-        player.studentEmail ?? 'No additional info',
-        style: TextStyle(color: Colors.grey[600]),
-      );
+      return Text(player.studentEmail ?? 'No additional info',
+          style: TextStyle(color: Colors.grey[600]));
     }
     return Text(parts.join(' • '),
         style: TextStyle(color: Colors.grey[600]));
@@ -1153,7 +1091,6 @@ class _RosterScreenState extends State<RosterScreen> {
           children: [
             if (player.jerseyNumber != null)
               _detailRow('Jersey', player.jerseyNumber!),
-            // CHANGE (v1.4): show position in detail dialog.
             if (player.position != null && player.position!.isNotEmpty)
               _detailRow('Position', player.position!),
             if (player.nickname != null && player.nickname!.isNotEmpty)
@@ -1164,37 +1101,42 @@ class _RosterScreenState extends State<RosterScreen> {
                 player.studentEmail!.isNotEmpty)
               _detailRow('Email', player.studentEmail!),
             _detailRow('Status', player.statusLabel),
+            // CHANGE (v1.5): Show account link status in detail dialog.
+            _detailRow('Account',
+                player.hasLinkedAccount ? 'Linked ✓' : 'Not linked'),
           ],
         ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx),
               child: const Text('Close')),
-          OutlinedButton.icon(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _showStatusMenu(player);
-            },
-            icon: Icon(player.statusIcon, size: 16),
-            label: const Text('Change Status'),
-          ),
-          FilledButton.icon(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final result = await Navigator.push<bool>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => AddPlayerScreen(
-                    teamId: widget.teamId,
-                    playerToEdit: player,
+          if (_isCoachOrOwner) ...[
+            OutlinedButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _showStatusMenu(player);
+              },
+              icon: Icon(player.statusIcon, size: 16),
+              label: const Text('Status'),
+            ),
+            FilledButton.icon(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                final result = await Navigator.push<bool>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => AddPlayerScreen(
+                      teamId: widget.teamId,
+                      playerToEdit: player,
+                    ),
                   ),
-                ),
-              );
-              if (result == true && mounted) _loadFirstPage();
-            },
-            icon: const Icon(Icons.edit),
-            label: const Text('Edit'),
-          ),
+                );
+                if (result == true && mounted) _loadFirstPage();
+              },
+              icon: const Icon(Icons.edit),
+              label: const Text('Edit'),
+            ),
+          ],
         ],
       ),
     );
@@ -1209,8 +1151,7 @@ class _RosterScreenState extends State<RosterScreen> {
           SizedBox(
               width: 100,
               child: Text('$label:',
-                  style:
-                      const TextStyle(fontWeight: FontWeight.bold))),
+                  style: const TextStyle(fontWeight: FontWeight.bold))),
           Expanded(child: Text(value)),
         ],
       ),

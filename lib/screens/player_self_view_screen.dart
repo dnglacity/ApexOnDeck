@@ -1,24 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:sweatdex/models/player.dart';
+import '../models/player.dart';
 import '../services/player_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// player_self_view_screen.dart  (AOD v1.3 — NEW)
+// player_self_view_screen.dart  (AOD v1.5)
 //
-// A read-only screen shown to players when they tap a team that they are
-// linked to via player_accounts.  It displays:
+// CHANGE (Notes.txt v1.5 — Unified users):
+//   • getMyPlayerOnTeam() now resolves the player via players.user_id directly
+//     instead of going through the old player_accounts join table.
+//   • No other changes to this screen's UI or logic.
 //
-//   1. Their own player card (name, jersey, nickname, current status).
-//   2. Their attendance summary (present / absent / late / excused counts
-//      derived from the current status — a full history table would require
-//      a separate attendance_log table, which is a future enhancement).
-//   3. A scrollable list of teammates (other players on the same team)
-//      showing jersey number and name only — no status details exposed.
-//
-// This screen is intentionally read-only: no status-change buttons, no
-// edit controls, no FAB.  Players can pull-to-refresh the list if needed.
-//
-// NAVIGATION: TeamSelectionScreen routes here when is_player == true (v1.3).
+// Retained from v1.3:
+//   • Read-only view of own player card, current status, and teammates list.
+//   • Pull-to-refresh support.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class PlayerSelfViewScreen extends StatefulWidget {
@@ -41,7 +35,7 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
   /// The player row linked to the current auth account on this team.
   Player? _myPlayer;
 
-  /// All players on the team (including self) — used for the teammates list.
+  /// All players on the team — used for the teammates list.
   List<Player> _allPlayers = [];
 
   bool _loading = true;
@@ -55,7 +49,6 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
-  /// Fetches the current user's linked player record and all teammates.
   Future<void> _loadData() async {
     setState(() {
       _loading = true;
@@ -63,11 +56,10 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
     });
 
     try {
-      // Step 1: Get the player row linked to the current auth account.
+      // CHANGE (v1.5): getMyPlayerOnTeam() now uses players.user_id FK
+      // instead of the old player_accounts table.
       final myPlayerData =
           await _playerService.getMyPlayerOnTeam(widget.teamId);
-
-      // Step 2: Fetch all players on the team for the teammates list.
       final allPlayers = await _playerService.getPlayers(widget.teamId);
 
       setState(() {
@@ -115,8 +107,6 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
     );
   }
 
-  // ── Error state ───────────────────────────────────────────────────────────
-
   Widget _buildError() {
     return Center(
       child: Column(
@@ -136,10 +126,7 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
     );
   }
 
-  // ── Main content ──────────────────────────────────────────────────────────
-
   Widget _buildContent(ThemeData theme, ColorScheme cs) {
-    // Separate self from teammates list.
     final teammates = _myPlayer != null
         ? _allPlayers.where((p) => p.id != _myPlayer!.id).toList()
         : _allPlayers;
@@ -147,23 +134,16 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        // ── My Player Card ────────────────────────────────────────────────
         if (_myPlayer != null) ...[
-          Text(
-            'My Profile',
-            style: theme.textTheme.titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
-          ),
+          Text('My Profile',
+              style: theme.textTheme.titleMedium
+                  ?.copyWith(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           _MyPlayerCard(player: _myPlayer!, cs: cs),
           const SizedBox(height: 24),
-
-          // ── Attendance Summary ─────────────────────────────────────────
-          Text(
-            'Current Status',
-            style: theme.textTheme.titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold),
-          ),
+          Text('Current Status',
+              style: theme.textTheme.titleMedium
+                  ?.copyWith(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           _AttendanceSummaryCard(player: _myPlayer!, cs: cs),
           const SizedBox(height: 24),
@@ -191,16 +171,13 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
           const SizedBox(height: 24),
         ],
 
-        // ── Teammates List ────────────────────────────────────────────────
+        // ── Teammates list ────────────────────────────────────────────────
         Row(
           children: [
-            Text(
-              'Teammates',
-              style: theme.textTheme.titleMedium
-                  ?.copyWith(fontWeight: FontWeight.bold),
-            ),
+            Text('Teammates',
+                style: theme.textTheme.titleMedium
+                    ?.copyWith(fontWeight: FontWeight.bold)),
             const SizedBox(width: 8),
-            // Count badge.
             Container(
               padding:
                   const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -231,7 +208,7 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _MyPlayerCard — displays the player's own info prominently
+// _MyPlayerCard
 // ─────────────────────────────────────────────────────────────────────────────
 class _MyPlayerCard extends StatelessWidget {
   final Player player;
@@ -247,7 +224,6 @@ class _MyPlayerCard extends StatelessWidget {
         padding: const EdgeInsets.all(20),
         child: Row(
           children: [
-            // Jersey avatar.
             CircleAvatar(
               radius: 36,
               backgroundColor: cs.primary,
@@ -265,23 +241,24 @@ class _MyPlayerCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    player.name,
-                    style: const TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
+                  Text(player.name,
+                      style: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.bold)),
                   if (player.nickname != null &&
                       player.nickname!.isNotEmpty) ...[
                     const SizedBox(height: 2),
-                    Text(
-                      '"${player.nickname}"',
-                      style: TextStyle(
-                          fontStyle: FontStyle.italic,
-                          color: Colors.grey[600]),
-                    ),
+                    Text('"${player.nickname}"',
+                        style: TextStyle(
+                            fontStyle: FontStyle.italic,
+                            color: Colors.grey[600])),
+                  ],
+                  if (player.position != null &&
+                      player.position!.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(player.position!,
+                        style: TextStyle(color: Colors.grey[600])),
                   ],
                   const SizedBox(height: 6),
-                  // Status chip.
                   Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 10, vertical: 4),
@@ -318,7 +295,7 @@ class _MyPlayerCard extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _AttendanceSummaryCard — read-only status display
+// _AttendanceSummaryCard
 // ─────────────────────────────────────────────────────────────────────────────
 class _AttendanceSummaryCard extends StatelessWidget {
   final Player player;
@@ -329,8 +306,8 @@ class _AttendanceSummaryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // [Inference] Currently only the live status is available per the existing
-    // data model (no attendance_log table).  The card displays a note
-    // explaining this.  A future enhancement can add historical tracking.
+    // data model (no attendance_log table). A future enhancement can add
+    // historical tracking.
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -342,7 +319,7 @@ class _AttendanceSummaryCard extends StatelessWidget {
                 Icon(player.statusIcon, color: player.statusColor),
                 const SizedBox(width: 8),
                 Text(
-                  'Today\'s Status: ${player.statusLabel}',
+                  "Today's Status: ${player.statusLabel}",
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     color: player.statusColor,
@@ -365,8 +342,7 @@ class _AttendanceSummaryCard extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// _TeammateRow — a single read-only teammate entry
-// Names and jersey numbers only — no status details shared with players
+// _TeammateRow — read-only teammate entry (names and jersey only)
 // ─────────────────────────────────────────────────────────────────────────────
 class _TeammateRow extends StatelessWidget {
   final Player player;
