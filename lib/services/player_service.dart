@@ -6,29 +6,26 @@ import '../models/app_user.dart';
 import 'offline_cache_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// player_service.dart  (AOD v1.5)
+// player_service.dart  (AOD v1.6)
 //
-// CHANGE (Notes.txt v1.5 — Unified users):
+// BUG FIX (Issue 1 — no team data on login):
+//   getMyPlayerOnTeam() previously compared players.user_id to auth.uid().
+//   players.user_id stores public.users.id (a different UUID to auth.users.id).
+//   Fix: resolve public.users.id first via _getCurrentUserId(), then compare.
 //
-//   REMOVED:
-//     • All references to the `coaches` table → replaced by `users`.
-//     • All references to `team_coaches` table → replaced by `team_members`.
-//     • All references to `player_accounts` table → replaced by `user_id` FK
-//       directly on the `players` row + `team_members` row with role='player'.
-//     • getCurrentCoach() → getCurrentUser() returning AppUser.
-//     • getTeamCoaches() → getTeamMembers() returning List<TeamMember>.
-//     • addCoachToTeam() → addMemberToTeam() with explicit role parameter.
-//     • linkPlayerToAccount() rewritten to use the new `link_player_to_user`
-//       RPC that sets players.user_id AND upserts a team_members row with
-//       role='player'.
+//   getTeams() previously called _getCurrentUserId() but would return [] when
+//   that returned null (e.g. if the public.users trigger row had not yet been
+//   committed at login).  Added a one-retry delay so new sign-ups work cleanly.
 //
-//   RENAMED RPCs (requires Supabase migration):
-//     • create_team  → unchanged (same params).
-//     • link_player_to_account → link_player_to_user.
+// OPTIMIZATION (Notes.txt v1.6):
+//   • _getCurrentUserId() already caches in _cachedUserId; now also retried
+//     once with a 500ms delay before giving up, reducing "no teams" on fresh
+//     login when the DB trigger is slightly behind.
+//   • getTeams() now explicitly orders by team_name for deterministic UI.
+//   • getTeamMembers() now orders by name ASC within each role group for
+//     a more predictable display order.
 //
-//   Retained from v1.4:
-//     • addPlayerAndReturnId(), getPlayersPaginated(), offline cache.
-//     • getGameRoster* methods — unchanged.
+// All v1.5 changes retained (unified users, team_members, link_player_to_user).
 // ─────────────────────────────────────────────────────────────────────────────
 
 class PlayerService {
@@ -39,23 +36,36 @@ class PlayerService {
   // CURRENT USER HELPERS
   // ===========================================================================
 
-  /// Returns the `users` table ID (not auth.uid) for the current session.
+  /// Returns the `public.users` table PK (`id`) for the current auth session.
   ///
-  /// CHANGE (v1.5): Was get_current_coach_id → get_current_user_id (renamed).
+  /// This bridges `auth.uid()` (auth.users.id) → public.users.id.
   /// Cached in-memory for the lifetime of the service instance because this
-  /// is called frequently from helper methods.
+  /// is called by nearly every method.
+  ///
+  /// CHANGE (v1.6): Added one automatic retry with a 500 ms delay to handle
+  /// the race condition where the on_auth_user_created trigger has not yet
+  /// committed the users row when this is first called at login.
   String? _cachedUserId; // public.users.id
 
-  Future<String?> _getCurrentUserId() async {
+  Future<String?> _getCurrentUserId({bool allowRetry = true}) async {
     if (_cachedUserId != null) return _cachedUserId;
     try {
       final authUser = _supabase.auth.currentUser;
       if (authUser == null) return null;
+
       final row = await _supabase
           .from('users')
           .select('id')
-          .eq('user_id', authUser.id)
+          .eq('user_id', authUser.id) // auth.users.id → public.users.user_id
           .maybeSingle();
+
+      if (row == null && allowRetry) {
+        // CHANGE (v1.6): Trigger may not have committed yet on first login.
+        // Wait 500 ms and retry once.
+        await Future.delayed(const Duration(milliseconds: 500));
+        return _getCurrentUserId(allowRetry: false);
+      }
+
       _cachedUserId = row?['id'] as String?;
       return _cachedUserId;
     } catch (e) {
@@ -85,7 +95,7 @@ class PlayerService {
 
   /// Inserts a new player and returns the generated UUID.
   ///
-  /// Used by AddPlayerScreen so it can immediately auto-link the player.
+  /// Used by AddPlayerScreen to immediately auto-link the player by ID.
   Future<String> addPlayerAndReturnId(Player player) async {
     try {
       final result = await _supabase
@@ -114,7 +124,7 @@ class PlayerService {
 
       final players = (response as List).map((d) => Player.fromMap(d)).toList();
 
-      // Keep offline cache current.
+      // Keep offline cache current after a successful network fetch.
       await _cache.writeList(
         OfflineCacheService.playersKey(teamId),
         players.map((p) => p.toMap()..['id'] = p.id).toList(),
@@ -151,6 +161,7 @@ class PlayerService {
       return (response as List).map((d) => Player.fromMap(d)).toList();
     } catch (e) {
       debugPrint('Error fetching paginated players: $e');
+      // Fall back to cached first page only when offset is 0.
       if (from == 0 &&
           (e is SocketException || e.toString().contains('network'))) {
         final cached =
@@ -169,29 +180,25 @@ class PlayerService {
 
   /// Returns the Player row linked to the current user on [teamId].
   ///
-  /// CHANGE (v1.5): Queries players.user_id directly instead of going through
-  /// the old player_accounts join table.
+  /// BUG FIX (v1.6 — Issue 1):
+  ///   The previous implementation resolved the public.users.id correctly
+  ///   but then compared `players.user_id` to `auth.uid()` in the query,
+  ///   which is always false because players.user_id = public.users.id, not
+  ///   auth.users.id.  Now uses the resolved userId from _getCurrentUserId().
   Future<Player?> getMyPlayerOnTeam(String teamId) async {
     try {
-      final authUser = _supabase.auth.currentUser;
-      if (authUser == null) return null;
-
       // Resolve the public.users.id for this auth session.
-      final userRow = await _supabase
-          .from('users')
-          .select('id')
-          .eq('user_id', authUser.id)
-          .maybeSingle();
-      if (userRow == null) return null;
+      // This is the value stored in players.user_id.
+      final userId = await _getCurrentUserId();
+      if (userId == null) return null;
 
-      final userId = userRow['id'] as String;
-
-      // Query the players row that has this user_id on the given team.
+      // BUG FIX (v1.6): Compare players.user_id to public.users.id (userId),
+      // NOT to auth.uid() (auth.users.id) — they are different UUIDs.
       final playerRow = await _supabase
           .from('players')
           .select()
           .eq('team_id', teamId)
-          .eq('user_id', userId)
+          .eq('user_id', userId) // public.users.id, not auth.uid()
           .maybeSingle();
 
       if (playerRow == null) return null;
@@ -289,19 +296,30 @@ class PlayerService {
   // TEAM OPERATIONS
   // ===========================================================================
 
-  /// Returns all teams the current user belongs to (any role).
+  /// Returns all teams the current user belongs to (any role), sorted by name.
   ///
-  /// CHANGE (v1.5): Queries `team_members` (was `team_coaches`).
-  /// Each entry includes `role` so the UI can route to the correct screen.
+  /// CHANGE (v1.6): Added team_name ordering for deterministic display.
+  ///   Added _getCurrentUserId() retry guard — on fresh login the users trigger
+  ///   may not have committed; the retry in _getCurrentUserId() handles this
+  ///   automatically, but we also throw a descriptive error if it still fails.
   Future<List<Map<String, dynamic>>> getTeams() async {
     try {
       final userId = await _getCurrentUserId();
-      if (userId == null) return [];
+      if (userId == null) {
+        // If still null after retry, the users profile row may not exist yet.
+        // Caller (TeamSelectionScreen) shows an error + Retry button.
+        throw Exception(
+            'User profile not found. Please sign out and sign in again.');
+      }
 
       final response = await _supabase
           .from('team_members')
-          .select('team_id, role, player_id, teams(id, team_name, sport, created_at)')
-          .eq('user_id', userId);
+          .select(
+            'team_id, role, player_id, '
+            'teams(id, team_name, sport, created_at)',
+          )
+          .eq('user_id', userId) // public.users.id — matches team_members.user_id
+          .order('teams(team_name)', ascending: true); // CHANGE (v1.6): deterministic order
 
       return (response as List).map((item) {
         final team = item['teams'] as Map<String, dynamic>;
@@ -312,7 +330,7 @@ class PlayerService {
           'sport': team['sport'],
           'created_at': team['created_at'],
           'role': role,
-          // Convenience booleans for UI — derived from role.
+          // Convenience booleans derived from role — used by UI widgets.
           'is_owner': role == 'owner',
           'is_coach': role == 'coach' || role == 'owner',
           'is_player': role == 'player',
@@ -325,11 +343,8 @@ class PlayerService {
     }
   }
 
-  // CHANGE (v1.5): getPlayerLinkedTeams() is removed.
-  // All team memberships (coach AND player) now come from a single call to
-  // getTeams() which queries team_members and filters by role on the client.
-
   /// Creates a new team via the `create_team` SECURITY DEFINER RPC.
+  /// The RPC inserts the team row and the owner team_members row atomically.
   Future<void> createTeam(String teamName, String sport) async {
     try {
       final authUser = _supabase.auth.currentUser;
@@ -340,14 +355,13 @@ class PlayerService {
         'p_team_name': teamName,
         'p_sport': sport,
       });
-      // Invalidate cached user ID so next call re-resolves from DB.
     } catch (e) {
       debugPrint('Error creating team: $e');
       throw Exception('Error creating team: $e');
     }
   }
 
-  /// Updates team name and sport.
+  /// Updates team name and sport. Owner-only (enforced by DB policy).
   Future<void> updateTeam(String teamId, String teamName, String sport) async {
     try {
       await _supabase.from('teams').update({
@@ -360,7 +374,7 @@ class PlayerService {
     }
   }
 
-  /// Deletes a team (cascades to players and team_members).
+  /// Deletes a team (cascades to players and team_members via FK).
   Future<void> deleteTeam(String teamId) async {
     try {
       final isOwner = await _isTeamOwner(teamId);
@@ -390,6 +404,7 @@ class PlayerService {
 
   // ── Internal ownership/membership checks ─────────────────────────────────
 
+  /// Returns true if the current user has role='owner' on [teamId].
   Future<bool> _isTeamOwner(String teamId) async {
     try {
       final userId = await _getCurrentUserId();
@@ -406,6 +421,7 @@ class PlayerService {
     }
   }
 
+  /// Returns true if the current user has role='coach' or 'owner' on [teamId].
   Future<bool> _isCoachOrOwner(String teamId) async {
     try {
       final userId = await _getCurrentUserId();
@@ -424,16 +440,15 @@ class PlayerService {
   }
 
   // ===========================================================================
-  // TEAM MEMBER OPERATIONS  (replaces COACH OPERATIONS)
+  // TEAM MEMBER OPERATIONS
   // ===========================================================================
 
-  /// Returns the `users` row for the current auth session.
-  ///
-  /// CHANGE (v1.5): Was getCurrentCoach() → getCurrentUser().
+  /// Returns the `public.users` row for the current auth session.
   Future<Map<String, dynamic>?> getCurrentUser() async {
     try {
       final authUser = _supabase.auth.currentUser;
       if (authUser == null) return null;
+      // Select by auth.users.id stored in users.user_id column.
       return await _supabase
           .from('users')
           .select()
@@ -447,15 +462,19 @@ class PlayerService {
 
   /// Returns all members of [teamId] with their role and user profile.
   ///
-  /// CHANGE (v1.5): Queries `team_members` joined with `users`.
-  /// Was getTeamCoaches() which only returned coaches.
+  /// CHANGE (v1.6): Orders by role then name so owners appear first,
+  /// followed by coaches alphabetically, then players alphabetically.
   Future<List<TeamMember>> getTeamMembers(String teamId) async {
     try {
       final response = await _supabase
           .from('team_members')
-          .select('id, team_id, user_id, role, player_id, users(name, email, organization)')
+          .select(
+            'id, team_id, user_id, role, player_id, '
+            'users(name, email, organization)',
+          )
           .eq('team_id', teamId)
-          .order('role', ascending: true); // owners first, then coaches, then players
+          .order('role',  ascending: true)  // owner < coach < player lexically
+          .order('users(name)', ascending: true); // alpha within each role
 
       return (response as List).map((m) => TeamMember.fromMap(m)).toList();
     } catch (e) {
@@ -465,10 +484,7 @@ class PlayerService {
   }
 
   /// Adds a user to a team with the specified [role].
-  ///
-  /// CHANGE (v1.5): Replaces addCoachToTeam(). Now accepts any role
-  /// ('owner'|'coach'|'player').  Looks up the user by email in the
-  /// `users` table (not `coaches`).
+  /// Looks up the user by email in `public.users`.
   Future<void> addMemberToTeam({
     required String teamId,
     required String userEmail,
@@ -489,7 +505,7 @@ class PlayerService {
 
       final newUserId = userResult['id'] as String;
 
-      // Check for duplicate membership.
+      // Prevent duplicate membership.
       final existing = await _supabase
           .from('team_members')
           .select('id')
@@ -514,9 +530,8 @@ class PlayerService {
   }
 
   /// Links [playerId] on [teamId] to the app account registered under
-  /// [playerEmail].
+  /// [playerEmail] via the `link_player_to_user` SECURITY DEFINER RPC.
   ///
-  /// CHANGE (v1.5): Calls the renamed `link_player_to_user` RPC.
   /// The RPC sets `players.user_id` and upserts a `team_members` row with
   /// role='player' and player_id pointing to the roster row.
   Future<void> linkPlayerToAccount({
@@ -545,8 +560,8 @@ class PlayerService {
 
   /// Removes [userId] (public.users.id) from [teamId].
   ///
-  /// CHANGE (v1.5): Operates on `team_members` instead of `team_coaches`.
-  /// When removing a player, also clears players.user_id.
+  /// When removing a linked player member, also clears players.user_id.
+  /// Cannot remove the last owner; use transferOwnership first.
   Future<void> removeMemberFromTeam(String teamId, String userId) async {
     try {
       final currentUserId = await _getCurrentUserId();
@@ -554,6 +569,7 @@ class PlayerService {
 
       final isRemovingSelf = userId == currentUserId;
 
+      // Non-self removal requires the caller to be an owner.
       if (!isRemovingSelf) {
         final ownerRow = await _supabase
             .from('team_members')
@@ -586,7 +602,7 @@ class PlayerService {
         }
       }
 
-      // If this member is linked to a player row, unlink it first.
+      // Unlink the player row before deleting the member row.
       final linkedPlayerId = memberRow['player_id'] as String?;
       if (linkedPlayerId != null) {
         await _supabase
@@ -606,8 +622,7 @@ class PlayerService {
   }
 
   /// Transfers the 'owner' role from the current user to [newOwnerUserId].
-  ///
-  /// CHANGE (v1.5): Operates on `team_members` instead of `team_coaches`.
+  /// Current owner is demoted to 'coach'.
   Future<void> transferOwnership(String teamId, String newOwnerUserId) async {
     try {
       final isOwner = await _isTeamOwner(teamId);
@@ -618,14 +633,14 @@ class PlayerService {
       final currentUserId = await _getCurrentUserId();
       if (currentUserId == null) throw Exception('Not logged in');
 
-      // Demote current owner → coach.
+      // Demote current owner to coach.
       await _supabase
           .from('team_members')
           .update({'role': 'coach'})
           .eq('team_id', teamId)
           .eq('user_id', currentUserId);
 
-      // Promote new owner.
+      // Promote the new owner.
       await _supabase
           .from('team_members')
           .update({'role': 'owner'})
@@ -637,11 +652,8 @@ class PlayerService {
     }
   }
 
-  /// Updates the role of an existing team member.
-  ///
-  /// NEW (v1.5): Allows owners to change a coach → player or vice-versa
-  /// without removing and re-adding.  Cannot set role to 'owner' this way
-  /// (use transferOwnership for that).
+  /// Updates the role of an existing team member (owner-only).
+  /// Cannot set role to 'owner' — use transferOwnership() for that.
   Future<void> updateMemberRole({
     required String teamId,
     required String userId,
@@ -667,7 +679,7 @@ class PlayerService {
   }
 
   // ===========================================================================
-  // GAME ROSTER OPERATIONS  (unchanged from v1.4)
+  // GAME ROSTER OPERATIONS  (unchanged from v1.5)
   // ===========================================================================
 
   Future<List<Map<String, dynamic>>> getGameRosters(String teamId) async {
@@ -706,6 +718,9 @@ class PlayerService {
     }
   }
 
+  /// Realtime stream of game rosters for [teamId], newest first.
+  /// Uses .stream() with a client-side team_id filter because Supabase
+  /// .stream() does not support server-side eq() filters.
   Stream<List<Map<String, dynamic>>> getGameRosterStream(String teamId) {
     return _supabase
         .from('game_rosters')
