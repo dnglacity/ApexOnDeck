@@ -1,8 +1,0 @@
-AOD v1.5
-
-Change all coaches and players to users. Permissions will only be based on team role (owner, coach, player, etc)
-
-
-
-
-
