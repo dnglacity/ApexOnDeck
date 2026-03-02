@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../constants/date_constants.dart';
 import '../services/auth_service.dart';
 import '../services/player_service.dart';
 import 'account_settings_screen.dart';
@@ -36,12 +37,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
   /// 0 = Mon … 6 = Sun (ISO weekday - 1).
   int get _startWeekday => (_firstDayOfMonth.weekday - 1) % 7;
 
-  static const _weekdayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-
-  static const _monthNames = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
-  ];
 
   void _previousMonth() => setState(() {
         _focusedMonth =
@@ -169,7 +164,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
             tooltip: 'Previous month',
           ),
           Text(
-            '${_monthNames[_focusedMonth.month - 1]} ${_focusedMonth.year}',
+            '${kMonthNames[_focusedMonth.month - 1]} ${_focusedMonth.year}',
             style: const TextStyle(
                 fontSize: 18, fontWeight: FontWeight.bold),
           ),
@@ -189,7 +184,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Row(
-        children: _weekdayLabels
+        children: kWeekdayLabels
             .map((label) => Expanded(
                   child: Center(
                     child: Text(
@@ -275,8 +270,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   Widget _buildEventsList(ColorScheme cs) {
     final label = _selectedDay != null
-        ? '${_monthNames[_selectedDay!.month - 1]} ${_selectedDay!.day}'
-        : _monthNames[_focusedMonth.month - 1];
+        ? '${kMonthNames[_selectedDay!.month - 1]} ${_selectedDay!.day}'
+        : kMonthNames[_focusedMonth.month - 1];
 
     return ListView(
       padding: const EdgeInsets.all(16),

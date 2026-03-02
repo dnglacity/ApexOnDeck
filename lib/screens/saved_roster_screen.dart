@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/auth_service.dart';
 import '../services/player_service.dart';
+import '../utils/ui_helpers.dart';
 import '../widgets/error_dialog.dart';
 import '../widgets/date_input_field.dart';
 import 'account_settings_screen.dart';
@@ -101,9 +102,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
       onError: (Object e) {
         if (mounted) {
           setState(() => _loading = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Roster stream error: $e')),
-          );
+          showInfoSnackBar(context, 'Roster stream error: $e');
         }
       },
     );
@@ -408,9 +407,7 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
         );
         // Realtime stream will add the new row automatically.
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('"$newTitle" created')),
-          );
+          showInfoSnackBar(context, '"$newTitle" created');
         }
       } catch (e) {
         if (mounted) showErrorDialog(context, e);

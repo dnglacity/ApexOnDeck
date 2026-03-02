@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../constants/date_constants.dart';
 import '../models/match.dart';
 import 'match_view_screen.dart';
 
@@ -24,11 +25,6 @@ class MatchesScreen extends StatelessWidget {
     this.onMatchDeleted,
     this.onMatchAdded,
   });
-
-  static const _monthNames = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
 
   @override
   Widget build(BuildContext context) {
@@ -110,7 +106,7 @@ class MatchesScreen extends StatelessWidget {
                   child: Column(
                     children: [
                       Text(
-                        _monthNames[match.date.month - 1].toUpperCase(),
+                        kShortMonthNames[match.date.month - 1].toUpperCase(),
                         style: TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.bold,

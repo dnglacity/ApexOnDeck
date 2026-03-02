@@ -6,7 +6,11 @@
       "Bash(ls:*)",
       "Bash(node:*)",
       "Bash(python3:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(wc:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(curl:*)"
     ]
   }
 }

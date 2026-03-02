@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/player_service.dart';
 import '../services/auth_service.dart';
+import '../utils/ui_helpers.dart';
 import '../widgets/sport_autocomplete_field.dart'; // Shared autocomplete widget
 import '../widgets/error_dialog.dart';
 import 'roster_screen.dart';
@@ -276,13 +277,11 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
         // Refresh so the updated name/sport appear immediately.
         await _refreshTeams();
         if (mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('Team updated!')));
+          showInfoSnackBar(context, 'Team updated!');
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text('Error: $e')));
+          showInfoSnackBar(context, 'Error: $e');
         }
       }
     }
@@ -319,9 +318,7 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
         await _playerService.deleteTeam(team['id'] as String);
         await _refreshTeams();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('${team['team_name']} deleted')),
-          );
+          showInfoSnackBar(context, '${team['team_name']} deleted');
         }
       } catch (e) {
         if (mounted) {
@@ -419,8 +416,7 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
         // Force refresh so the new team_members row is fetched from DB.
         await _refreshTeams();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Team created!')));
+          showInfoSnackBar(context, 'Team created!');
         }
       } catch (e) {
         if (mounted) {
@@ -449,14 +445,11 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
               return;
             }
             setDialogState(() { submitting = true; errorMsg = null; });
-            final messenger = ScaffoldMessenger.of(context);
             try {
               final result = await _playerService.redeemTeamInvite(code);
               if (ctx.mounted) {
                 Navigator.pop(ctx);
-                messenger.showSnackBar(SnackBar(
-                  content: Text('Joined ${result['team_name']}!'),
-                ));
+                if (mounted) showInfoSnackBar(context, 'Joined ${result['team_name']}!');
               }
             } catch (e) {
               if (ctx.mounted) {

@@ -14,6 +14,9 @@ class Match {
   final bool isHome; // true = Home, false = Away
   final String notes;
   final DateTime? createdAt;
+  // In-memory only — not persisted to DB.
+  final String? selectedRosterId;
+  final String? selectedRosterName;
 
   const Match({
     required this.id,
@@ -24,6 +27,8 @@ class Match {
     required this.isHome,
     this.notes = '',
     this.createdAt,
+    this.selectedRosterId,
+    this.selectedRosterName,
   });
 
   String get title => '$myTeamName vs. $opponentName';
@@ -60,6 +65,8 @@ class Match {
     bool? isHome,
     String? notes,
     DateTime? createdAt,
+    Object? selectedRosterId = _sentinel,
+    Object? selectedRosterName = _sentinel,
   }) =>
       Match(
         id: id ?? this.id,
@@ -70,5 +77,13 @@ class Match {
         isHome: isHome ?? this.isHome,
         notes: notes ?? this.notes,
         createdAt: createdAt ?? this.createdAt,
+        selectedRosterId: identical(selectedRosterId, _sentinel)
+            ? this.selectedRosterId
+            : selectedRosterId as String?,
+        selectedRosterName: identical(selectedRosterName, _sentinel)
+            ? this.selectedRosterName
+            : selectedRosterName as String?,
       );
 }
+
+const Object _sentinel = Object();

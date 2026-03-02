@@ -3,6 +3,8 @@ import '../main.dart' show kAppVersion;
 import '../models/app_user.dart';
 import '../services/auth_service.dart';
 import '../services/player_service.dart';
+import '../utils/controller_utils.dart';
+import '../utils/ui_helpers.dart';
 import '../widgets/error_dialog.dart';
 
 // =============================================================================
@@ -65,10 +67,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
 
   @override
   void dispose() {
-    _firstNameController.dispose();
-    _lastNameController.dispose();
-    _nicknameController.dispose();
-    _emailController.dispose();
+    [_firstNameController, _lastNameController, _nicknameController, _emailController].disposeAll();
     super.dispose();
   }
 
@@ -123,14 +122,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       await _loadProfile();
       setState(() => _isEditing = false);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Profile updated!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+      if (mounted) showSuccessSnackBar(context, 'Profile updated!');
     } catch (e) {
       if (mounted) {
         showErrorDialog(context, e);
@@ -357,10 +349,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                         if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                              content: Text(
-                                'Email updated! Check your inbox to verify '
-                                'the new address.',
-                              ),
+                              content: Text('Email updated! Check your inbox to verify the new address.'),
                               backgroundColor: Colors.green,
                               duration: Duration(seconds: 6),
                             ),
@@ -586,14 +575,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
 
                         if (ctx.mounted) Navigator.pop(ctx);
 
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Password updated successfully!'),
-                              backgroundColor: Colors.green,
-                            ),
-                          );
-                        }
+                        if (mounted) showSuccessSnackBar(context, 'Password updated successfully!');
                       } catch (e) {
                         setLocal(() {
                           isSubmitting = false;

@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/player_service.dart';
+import '../utils/controller_utils.dart';
+import '../utils/ui_helpers.dart';
+import '../utils/validation_utils.dart';
 
 // =============================================================================
 // reset_password_screen.dart  (AOD v1.10 — NEW)
@@ -32,15 +35,8 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
 
   @override
   void dispose() {
-    _passwordController.dispose();
-    _confirmController.dispose();
+    [_passwordController, _confirmController].disposeAll();
     super.dispose();
-  }
-
-  // ── Password strength helper (same rule as login_screen.dart) ─────────────
-  bool _isPasswordStrong(String password) {
-    return password.contains(RegExp(r'[a-zA-Z]')) &&
-           password.contains(RegExp(r'[0-9]'));
   }
 
   // ── Submit new password ───────────────────────────────────────────────────
@@ -57,14 +53,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
         UserAttributes(password: _passwordController.text),
       );
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Password updated! Please sign in with your new password.'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+      if (mounted) showSuccessSnackBar(context, 'Password updated! Please sign in with your new password.');
       _playerService.clearCache();
       await Supabase.instance.client.auth.signOut();
       // AuthWrapper routes to LoginScreen on signedOut event.
@@ -157,7 +146,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
                             if (v.length < 8) {
                               return 'Password must be at least 8 characters';
                             }
-                            if (!_isPasswordStrong(v)) {
+                            if (!isPasswordStrong(v)) {
                               return 'Password must include letters and numbers';
                             }
                             return null;

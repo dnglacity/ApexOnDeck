@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
+import '../utils/controller_utils.dart';
+import '../utils/ui_helpers.dart';
+import '../utils/validation_utils.dart';
 import '../widgets/error_dialog.dart';
 
 // =============================================================================
@@ -65,20 +68,15 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
-    _confirmPasswordController.dispose();
-    _firstNameController.dispose();
-    _lastNameController.dispose();
-    _organizationController.dispose();
+    [
+      _emailController,
+      _passwordController,
+      _confirmPasswordController,
+      _firstNameController,
+      _lastNameController,
+      _organizationController,
+    ].disposeAll();
     super.dispose();
-  }
-
-  // ── Password strength check ───────────────────────────────────────────────
-
-  bool _isPasswordStrong(String password) {
-    return password.contains(RegExp(r'[a-zA-Z]')) &&
-           password.contains(RegExp(r'[0-9]'));
   }
 
   // ── Submit handler ────────────────────────────────────────────────────────
@@ -86,11 +84,7 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _handleSubmit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_isSignUp && !_ageConfirmed) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('You must confirm you are 13 or older to create an account.'),
-        ),
-      );
+      showInfoSnackBar(context, 'You must confirm you are 13 or older to create an account.');
       return;
     }
     setState(() => _isLoading = true);
@@ -108,12 +102,7 @@ class _LoginScreenState extends State<LoginScreen> {
         );
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Account created! Check your email to verify your account, then sign in.'),
-              backgroundColor: Colors.green,
-            ),
-          );
+          showSuccessSnackBar(context, 'Account created! Check your email to verify your account, then sign in.');
           _toggleMode();
         }
       } else {
@@ -199,28 +188,15 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _handleForgotPassword() async {
     if (_emailController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter your email address first.')),
-      );
+      showInfoSnackBar(context, 'Please enter your email address first.');
       return;
     }
     try {
       await _authService.resetPassword(_emailController.text.trim());
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Password reset link sent! Check your email.'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+      if (mounted) showSuccessSnackBar(context, 'Password reset link sent! Check your email.');
     } catch (e) {
       debugPrint('LoginScreen _handleForgotPassword error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-      }
+      if (mounted) showInfoSnackBar(context, 'Error: $e');
     }
   }
 
@@ -411,7 +387,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             if (_isSignUp && v.length < 8) {
                               return 'Password must be at least 8 characters';
                             }
-                            if (_isSignUp && !_isPasswordStrong(v)) {
+                            if (_isSignUp && !isPasswordStrong(v)) {
                               return 'Password must include letters and numbers';
                             }
                             return null;

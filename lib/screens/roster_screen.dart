@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import '../models/player.dart';
 import '../services/player_service.dart';
 import '../services/auth_service.dart';
+import '../constants/date_constants.dart';
+import '../utils/ui_helpers.dart';
 import '../widgets/error_dialog.dart';
 import '../widgets/sport_autocomplete_field.dart'; // CHANGE: extracted widget
 import 'add_player_screen.dart';
@@ -196,7 +198,7 @@ class _RosterScreenState extends State<RosterScreen> {
                         suffixIcon: Icon(Icons.calendar_today, size: 18),
                       ),
                       child: Text(
-                        '${_kMonthNames[selectedDate.month - 1]} ${selectedDate.day}, ${selectedDate.year}',
+                        '${kShortMonthNames[selectedDate.month - 1]} ${selectedDate.day}, ${selectedDate.year}',
                       ),
                     ),
                   ),
@@ -261,9 +263,7 @@ class _RosterScreenState extends State<RosterScreen> {
                         if (ctx.mounted) Navigator.pop(ctx, match);
                       } catch (e) {
                         if (ctx.mounted) {
-                          ScaffoldMessenger.of(ctx).showSnackBar(
-                            SnackBar(content: Text('$e')),
-                          );
+                          showInfoSnackBar(ctx, '$e');
                         }
                       }
                     },
@@ -282,11 +282,6 @@ class _RosterScreenState extends State<RosterScreen> {
       }
     });
   }
-
-  static const _kMonthNames = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
 
   @override
   void initState() {
@@ -395,12 +390,8 @@ class _RosterScreenState extends State<RosterScreen> {
       await _playerService.updatePlayerStatus(player.id, newStatus);
       _applyLocalStatusChange(player.id, newStatus);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('${player.name} marked as $newStatus'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
+        showInfoSnackBar(context, '${player.name} marked as $newStatus',
+            duration: const Duration(seconds: 2));
       }
     } catch (e) {
       if (mounted) {
@@ -504,9 +495,7 @@ class _RosterScreenState extends State<RosterScreen> {
           _players = _players.map((p) => p.copyWith(status: action)).toList();
         });
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('All players marked as $action')),
-          );
+          showInfoSnackBar(context, 'All players marked as $action');
         }
       } catch (e) {
         if (mounted) showErrorDialog(context, e);
@@ -516,8 +505,7 @@ class _RosterScreenState extends State<RosterScreen> {
 
   Future<void> _confirmBulkDelete() async {
     if (_selectedIds.isEmpty) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('No players selected')));
+      showInfoSnackBar(context, 'No players selected');
       return;
     }
 
@@ -578,9 +566,7 @@ class _RosterScreenState extends State<RosterScreen> {
           _selectedIds.clear();
         });
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('${ids.length} player(s) deleted')),
-          );
+          showInfoSnackBar(context, '${ids.length} player(s) deleted');
         }
       } catch (e) {
         if (mounted) showErrorDialog(context, e);
@@ -694,14 +680,11 @@ class _RosterScreenState extends State<RosterScreen> {
           _sport    = capturedSport;
         });
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Team updated!')));
+          showInfoSnackBar(context, 'Team updated!');
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
-          );
+          showErrorSnackBar(context, 'Error: $e');
         }
       }
     }
@@ -802,11 +785,7 @@ class _RosterScreenState extends State<RosterScreen> {
                                   onPressed: () {
                                     Clipboard.setData(
                                         ClipboardData(text: code!));
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content:
-                                              Text('Invite code copied!')),
-                                    );
+                                    showInfoSnackBar(context, 'Invite code copied!');
                                   },
                                 ),
                               ),
@@ -831,19 +810,13 @@ class _RosterScreenState extends State<RosterScreen> {
                                       : () async {
                                           setDialogState(
                                               () => revoking = true);
-                                          final messenger =
-                                              ScaffoldMessenger.of(context);
                                           try {
                                             await _playerService
                                                 .revokeTeamInvite(
                                                     widget.teamId);
                                             if (ctx.mounted) {
                                               Navigator.of(ctx).pop();
-                                              messenger.showSnackBar(
-                                                const SnackBar(
-                                                    content: Text(
-                                                        'Invite code ended.')),
-                                              );
+                                              if (mounted) showInfoSnackBar(context, 'Invite code ended.');
                                             }
                                           } catch (e) {
                                             setDialogState(() {
@@ -895,7 +868,6 @@ class _RosterScreenState extends State<RosterScreen> {
               submitting = true;
               errorMsg = null;
             });
-            final messenger = ScaffoldMessenger.of(context);
             try {
               final result = await _playerService.redeemMatchInvite(
                   code, widget.teamId);
@@ -903,10 +875,7 @@ class _RosterScreenState extends State<RosterScreen> {
               await _loadMatches();
               if (ctx.mounted) {
                 Navigator.pop(ctx);
-                messenger.showSnackBar(SnackBar(
-                  content: Text(
-                      'Match vs. ${result['opponent_name']} added to your schedule!'),
-                ));
+                if (mounted) showInfoSnackBar(context, 'Match vs. ${result['opponent_name']} added to your schedule!');
               }
             } catch (e) {
               if (ctx.mounted) {
@@ -1178,9 +1147,7 @@ class _RosterScreenState extends State<RosterScreen> {
             .bulkDeletePlayers(allPlayers.map((p) => p.id).toList());
         setState(() => _players.clear());
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('All players deleted')),
-          );
+          showInfoSnackBar(context, 'All players deleted');
         }
       } catch (e) {
         if (mounted) showErrorDialog(context, e);
@@ -1475,15 +1442,12 @@ class _RosterScreenState extends State<RosterScreen> {
                                       color: Colors.white, size: 32),
                                 ),
                                 onDismissed: (_) async {
-                                  final sm = ScaffoldMessenger.of(context);
                                   try {
                                     await _playerService
                                         .deletePlayer(player.id);
                                     _removeLocalPlayer(player.id);
-                                    sm.showSnackBar(SnackBar(
-                                      content: Text(
-                                          '${player.name} removed'),
-                                    ));
+                                    // ignore: use_build_context_synchronously
+                                    if (mounted) showInfoSnackBar(context, '${player.name} removed');
                                   } catch (e) {
                                     // ignore: use_build_context_synchronously
                                     if (mounted) showErrorDialog(context, e);

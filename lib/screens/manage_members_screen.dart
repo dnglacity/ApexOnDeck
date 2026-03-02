@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/app_user.dart';
 import '../services/auth_service.dart';
 import '../services/player_service.dart';
+import '../utils/ui_helpers.dart';
 import '../widgets/error_dialog.dart';
 import 'account_settings_screen.dart';
 
@@ -230,11 +231,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
         );
         _refreshMembers();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text('Member added!'),
-                backgroundColor: Colors.green),
-          );
+          showSuccessSnackBar(context, 'Member added!');
         }
       } catch (e) {
         if (mounted) {
@@ -262,9 +259,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isSubmitting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading players: $e')),
-        );
+        showInfoSnackBar(context, 'Error loading players: $e');
       }
       return;
     } finally {
@@ -273,9 +268,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
 
     if (players.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No players on this team to link.')),
-        );
+        showInfoSnackBar(context, 'No players on this team to link.');
       }
       return;
     }
@@ -382,11 +375,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
         );
         _refreshMembers();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text('Player linked to account!'),
-                backgroundColor: Colors.green),
-          );
+          showSuccessSnackBar(context, 'Player linked to account!');
         }
       } catch (e) {
         if (mounted) {
@@ -441,9 +430,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
         }
 
         _refreshMembers();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${member.name} removed')),
-        );
+        showInfoSnackBar(context, '${member.name} removed');
       } catch (e) {
         if (mounted) {
           showErrorDialog(context, e);
@@ -513,10 +500,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
             'team_manager': 'Team Manager',
           };
           final label = roleLabels[selected] ?? selected;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content: Text("${member.name}'s role updated to $label")),
-          );
+          showInfoSnackBar(context, "${member.name}'s role updated to $label");
         }
       } catch (e) {
         if (mounted) {
@@ -535,10 +519,7 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
     final eligible = members.where((m) => !m.isOwner).toList();
 
     if (eligible.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('No other members to transfer to.')),
-      );
+      showInfoSnackBar(context, 'No other members to transfer to.');
       return;
     }
 
@@ -601,20 +582,11 @@ class _ManageMembersScreenState extends State<ManageMembersScreen> {
               widget.teamId, selected.userId);
           _refreshMembers();
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                  content: Text(
-                      'Ownership transferred to ${selected.name}')),
-            );
+            showInfoSnackBar(context, 'Ownership transferred to ${selected.name}');
           }
         } catch (e) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(e.toString().replaceAll('Exception: ', '')),
-                backgroundColor: Colors.red,
-              ),
-            );
+            showErrorSnackBar(context, e.toString().replaceAll('Exception: ', ''));
           }
         } finally {
           if (mounted) setState(() => _isSubmitting = false);

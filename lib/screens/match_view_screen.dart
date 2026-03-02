@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../constants/date_constants.dart';
 import '../models/match.dart';
 import '../services/player_service.dart';
+import '../utils/ui_helpers.dart';
 import 'game_roster_screen.dart';
+import 'match_format_screen.dart';
 import 'match_play_screen.dart';
 
 // =============================================================================
@@ -58,24 +61,12 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
   String? _selectedRosterId;
   String? _selectedRosterName;
 
-  static const _monthNames = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
-  ];
-
-  static const _shortMonthNames = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-
-  static const _dayNames = [
-    '', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
-  ];
-
   @override
   void initState() {
     super.initState();
     _match = widget.match;
+    _selectedRosterId = widget.match.selectedRosterId;
+    _selectedRosterName = widget.match.selectedRosterName;
   }
 
   @override
@@ -142,7 +133,7 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                     size: 16, color: cs.onSurface.withValues(alpha: 0.6)),
                 const SizedBox(width: 6),
                 Text(
-                  '${_shortMonthNames[_match.date.month - 1]} ${_match.date.day}, ${_match.date.year}',
+                  '${kShortMonthNames[_match.date.month - 1]} ${_match.date.day}, ${_match.date.year}',
                   style: tt.bodyMedium?.copyWith(
                     color: cs.onSurface.withValues(alpha: 0.8),
                   ),
@@ -301,6 +292,10 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
       setState(() {
         _selectedRosterId = result.id;
         _selectedRosterName = result.name;
+        _match = _match.copyWith(
+          selectedRosterId: result.id,
+          selectedRosterName: result.name,
+        );
       });
     }
   }
@@ -398,11 +393,7 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                                   onPressed: () {
                                     Clipboard.setData(
                                         ClipboardData(text: code!));
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text(
-                                              'Match invite code copied!')),
-                                    );
+                                    showInfoSnackBar(context, 'Match invite code copied!');
                                   },
                                 ),
                               ),
@@ -426,18 +417,12 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                                       : () async {
                                           setDialogState(
                                               () => revoking = true);
-                                          final messenger =
-                                              ScaffoldMessenger.of(context);
                                           try {
                                             await PlayerService()
                                                 .revokeMatchInvite(_match.id);
                                             if (ctx.mounted) {
                                               Navigator.of(ctx).pop();
-                                              messenger.showSnackBar(
-                                                const SnackBar(
-                                                    content: Text(
-                                                        'Match invite ended.')),
-                                              );
+                                              if (mounted) showInfoSnackBar(context, 'Match invite ended.');
                                             }
                                           } catch (e) {
                                             setDialogState(() {
@@ -476,7 +461,19 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
       builder: (_) => _MatchSettingsSheet(
         onEdit: () => _openEditSheet(context),
         onDelete: () => _confirmDelete(context),
+        onMatchFormat: () => _openMatchFormat(context),
       ),
+    );
+  }
+
+  void _openMatchFormat(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _MatchFormatPickerSheet(teamId: _match.teamId),
     );
   }
 
@@ -589,7 +586,7 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                             suffixIcon: Icon(Icons.calendar_today, size: 18),
                           ),
                           child: Text(
-                            '${_shortMonthNames[selectedDate.month - 1]} ${selectedDate.day}, ${selectedDate.year}',
+                            '${kShortMonthNames[selectedDate.month - 1]} ${selectedDate.day}, ${selectedDate.year}',
                           ),
                         ),
                       ),
@@ -657,9 +654,7 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                                 } catch (e) {
                                   setSheetState(() => isSaving = false);
                                   if (ctx.mounted) {
-                                    ScaffoldMessenger.of(ctx).showSnackBar(
-                                      SnackBar(content: Text('$e')),
-                                    );
+                                    showInfoSnackBar(ctx, '$e');
                                   }
                                 }
                               },
@@ -705,13 +700,12 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
             onPressed: () async {
               Navigator.pop(ctx); // close dialog
               final nav = Navigator.of(context);
-              final messenger = ScaffoldMessenger.of(context);
               try {
                 await PlayerService().deleteMatch(_match.id);
                 if (mounted) nav.pop(null); // null signals deletion to parent
               } catch (e) {
                 if (mounted) {
-                  messenger.showSnackBar(SnackBar(content: Text('$e')));
+                  showInfoSnackBar(context, '$e');
                 }
               }
             },
@@ -1034,8 +1028,7 @@ class _SelectRosterSheetState extends State<_SelectRosterSheet> {
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text('$e')));
+          showInfoSnackBar(context, '$e');
         }
       }
     }
@@ -1173,8 +1166,13 @@ class _SelectRosterSheetState extends State<_SelectRosterSheet> {
 class _MatchSettingsSheet extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onDelete;
+  final VoidCallback onMatchFormat;
 
-  const _MatchSettingsSheet({required this.onEdit, required this.onDelete});
+  const _MatchSettingsSheet({
+    required this.onEdit,
+    required this.onDelete,
+    required this.onMatchFormat,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1219,6 +1217,15 @@ class _MatchSettingsSheet extends StatelessWidget {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.format_list_bulleted_outlined),
+              title: const Text('Match Format'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () {
+                Navigator.pop(context);
+                onMatchFormat();
+              },
+            ),
+            ListTile(
               leading: Icon(Icons.delete_outline, color: cs.error),
               title: Text('Delete Match', style: TextStyle(color: cs.error)),
               onTap: () {
@@ -1228,6 +1235,200 @@ class _MatchSettingsSheet extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _MatchFormatPickerSheet — inline format manager opened from Match Settings.
+// ─────────────────────────────────────────────────────────────────────────────
+class _MatchFormatPickerSheet extends StatefulWidget {
+  final String teamId;
+
+  const _MatchFormatPickerSheet({required this.teamId});
+
+  @override
+  State<_MatchFormatPickerSheet> createState() =>
+      _MatchFormatPickerSheetState();
+}
+
+class _MatchFormatPickerSheetState extends State<_MatchFormatPickerSheet> {
+  final _service = PlayerService();
+  List<MatchFormatTemplate> _templates = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final rows = await _service.getMatchFormatTemplates(widget.teamId);
+      if (mounted) {
+        setState(() {
+          _templates = rows.map(MatchFormatTemplate.fromMap).toList();
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
+  Future<void> _openEdit(MatchFormatTemplate t) async {
+    final updated = await showModalBottomSheet<MatchFormatTemplate>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => EditFormatSheet(
+        template: t,
+        onDeleted: () {
+          if (mounted) {
+            setState(() => _templates.removeWhere((x) => x.id == t.id));
+          }
+        },
+      ),
+    );
+    if (updated != null && mounted) {
+      setState(() {
+        final i = _templates.indexWhere((x) => x.id == updated.id);
+        if (i != -1) _templates[i] = updated;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.55,
+      minChildSize: 0.35,
+      maxChildSize: 0.85,
+      builder: (_, scrollCtrl) => Column(
+        children: [
+          const SizedBox(height: 12),
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: cs.onSurface.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+            child: Row(
+              children: [
+                Text('Select Match Format',
+                    style: tt.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.bold)),
+                const Spacer(),
+                TextButton.icon(
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('New'),
+                  onPressed: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) =>
+                              MatchFormatScreen(teamId: widget.teamId)),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('Error loading formats',
+                                style: TextStyle(color: cs.error)),
+                            TextButton(
+                                onPressed: _load, child: const Text('Retry')),
+                          ],
+                        ),
+                      )
+                    : _templates.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.format_list_bulleted_outlined,
+                                    size: 48,
+                                    color: cs.onSurface.withValues(alpha: 0.3)),
+                                const SizedBox(height: 10),
+                                Text('No formats yet',
+                                    style: TextStyle(
+                                        color: cs.onSurface
+                                            .withValues(alpha: 0.5))),
+                                const SizedBox(height: 8),
+                                FilledButton.icon(
+                                  icon: const Icon(Icons.add, size: 16),
+                                  label: const Text('Create Format'),
+                                  onPressed: () {
+                                    Navigator.pop(context);
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                          builder: (_) => MatchFormatScreen(
+                                              teamId: widget.teamId)),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          )
+                        : ListView.separated(
+                            controller: scrollCtrl,
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            itemCount: _templates.length,
+                            separatorBuilder: (context, index) =>
+                                const Divider(height: 1),
+                            itemBuilder: (_, i) {
+                              final t = _templates[i];
+                              return ListTile(
+                                leading: const Icon(
+                                    Icons.format_list_bulleted_outlined),
+                                title: Text(t.name,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w600)),
+                                subtitle: Text(
+                                  '${t.sections.length} section${t.sections.length == 1 ? '' : 's'}',
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.edit_outlined),
+                                      tooltip: 'Edit',
+                                      onPressed: () => _openEdit(t),
+                                    ),
+                                    const Icon(Icons.chevron_right),
+                                  ],
+                                ),
+                                onTap: () => Navigator.pop(context, t),
+                              );
+                            },
+                          ),
+          ),
+        ],
       ),
     );
   }

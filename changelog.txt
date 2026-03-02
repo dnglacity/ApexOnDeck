@@ -1,3 +1,77 @@
+v1.20 03.02.2026 Fix: format slot assignments now persist across roster sessions
+- Fixed: format-template position assignments (player-to-slot) were not saved when hitting Save on the Roster tab; they now persist and restore correctly when reopening a saved roster
+- Added: format_slots jsonb column to game_rosters table (see Supabase_script.md for migration)
+- Changed: updateGameRosterLineup in player_service.dart accepts new optional formatSlots parameter (Map<String, String>: slot key → player UUID)
+- Changed: _saveRoster in game_roster_screen.dart passes _formatSlots serialized as player IDs
+- Changed: _loadPlayers in game_roster_screen.dart restores _formatSlots from rosterData['format_slots'] after loading player map
+
+v1.19 03.02.2026 Add Claude Code subagents for Flutter, debugging, code review, PostgreSQL, and security
+- Added: .claude/agents/flutter-expert.md — Flutter 3+ specialist subagent for cross-platform UI, state management, native integrations, and performance optimization
+- Added: .claude/agents/debugger.md — systematic debugging subagent for root cause analysis, stack trace investigation, and issue resolution
+- Added: .claude/agents/code-reviewer.md — comprehensive code review subagent covering quality, security vulnerabilities, and best practices
+- Added: .claude/agents/postgres-pro.md — PostgreSQL/Supabase expert subagent for query optimization, schema design, and RLS
+- Added: .claude/agents/security-auditor.md — security audit subagent for vulnerability assessment and auth/RLS review
+
+v1.18 03.02.2026 Match Format in Match View, cross-zone guard, DRY snackbar/controller refactor
+- Added: Match Format option in _MatchSettingsSheet (match_view_screen.dart) — opens _MatchFormatPickerSheet listing team templates with edit/select/create actions; tapping a template applies it to the match context
+- Added: _MatchFormatPickerSheet in match_view_screen.dart — DraggableScrollableSheet that loads format templates, supports edit via EditFormatSheet, and navigates to MatchFormatScreen for new formats
+- Added: onMatchFormat callback to _MatchSettingsSheet and _openMatchFormat() handler in _MatchViewScreenState
+- Fixed: cross-zone drag guard in GameRosterScreen — _addToStarters now blocks if the player is already on the bench (and vice versa), preventing a player from appearing on both sides simultaneously; shows an info snackbar on violation
+- Changed: Match model — added selectedRosterId and selectedRosterName as in-memory-only fields (not persisted to DB) with sentinel-pattern copyWith support
+- Changed: ~50 inline ScaffoldMessenger.showSnackBar constructions across login_screen, reset_password_screen, account_settings_screen, add_player_screen, manage_members_screen, game_roster_screen, saved_roster_screen, team_selection_screen, roster_screen, match_view_screen replaced with showSuccessSnackBar / showInfoSnackBar / showErrorSnackBar helpers from utils/ui_helpers.dart
+- Changed: dispose() overrides in login_screen and reset_password_screen collapsed to .disposeAll() extension
+- Changed: calendar_screen and roster_screen now import kMonthNames/kShortMonthNames/kWeekdayLabels from constants/date_constants.dart; local duplicate const arrays removed
+
+v1.17 03.02.2026 Fix cross-zone drag and blue hover glow on Roster tab
+- Fixed: starters could not be dragged to the Substitutes zone — root cause was SingleChildScrollView scrolling the subs zone out of viewport during drag, making it unreachable
+- Changed: _RosterTabView layout replaced with a Column of two Expanded halves (starters top, subs bottom) so both zones are always on-screen simultaneously
+- Changed: ReorderableListView inside each zone no longer uses shrinkWrap/NeverScrollableScrollPhysics; scrolls within its own Expanded parent
+- Added: SizedBox.expand wraps each zone's content so the full area registers as a drop target
+- Added: blue glow box shadow + blue border on both drop zones when a dragged player hovers over them
+- Fixed: bracket error in _SubsDropZone.build from incomplete prior edit
+
+v1.16 03.01.2026 Duplicate player positions in Roster tab
+- Added: players in the Roster tab can now be dragged onto multiple positions within the same side (starters or substitutes)
+- Added: yellow warning badge with occurrence count shown next to player name when assigned to more than one position
+- Changed: _StarterDropZone and _SubsDropZone now accept drops of already-assigned players (creates duplicate), but block cross-side drops (player can't be on both starters and subs simultaneously)
+- Changed: _addToStarters and _addToSubs validate cross-side constraints before adding
+- Changed: promote/demote actions (_promoteSubToStarter, _demoteStarterToSub) now remove ALL occurrences of a player from the source side before moving
+- Changed: ReorderableListView item keys changed from player-id-based to index-based to support duplicate player entries without key collisions
+- Added: appearanceCount parameter to _RosterRowTile for warning badge rendering
+
+v1.14 03.01.2026 Fix match format not persisting across game roster sessions
+- Fixed: match format selection was lost when saving and reopening a game roster
+- Added: match_format_template_id column to game_rosters table (nullable FK to match_format_templates)
+- Changed: updateGameRosterLineup now accepts and saves matchFormatTemplateId
+- Added: getMatchFormatTemplateById in PlayerService to fetch a single template by ID
+- Changed: _loadPlayers in GameRosterScreen restores _activeFormat from saved match_format_template_id on load
+
+v1.15 03.01.2026 Match Format integration in Game Roster
+- Added: "Match Format" button in the bottom-left of GameRosterScreen — always visible
+- Added: _MatchFormatPickerSheet — bottom sheet that loads and lists saved match format templates; tapping one applies it to the Roster tab; "New" button navigates to MatchFormatScreen to create templates
+- Added: Format-based split layout in _RosterTabView — when a format is active, Roster tab shows sections as headers with numbered position slots on the left and starters/substitutes list on the right
+- Added: _FormatPositionSlot widget — tappable slot that opens a player picker (from unassigned starters/subs) when empty, or clears the assignment when tapped with a player assigned
+- Added: _FormatPlayerTile widget — shows a player in the right-side list, dimmed with a check when already assigned to a slot
+- Added: Clear/dismiss button next to the active format name in the bottom bar to remove the format and return to standard layout
+- Changed: bottomNavigationBar now always renders (previously only shown when onCancel != null) to host the Match Format button
+
+v1.13 03.01.2026 Match Format Templates
+- Added: screens/match_format_screen.dart — full screen listing team Match Format templates with a "+" AppBar button to create new ones; each template has a name and flexible sections (title + position count)
+- Added: MatchFormatTemplate and MatchFormatSection models in match_format_screen.dart
+- Added: PlayerService.getMatchFormatTemplates(), createMatchFormatTemplate(), deleteMatchFormatTemplate() service methods
+- Added: "Match Format" ListTile in _MatchSettingsSheet (match_view_screen.dart) that navigates to MatchFormatScreen
+- Added: Supabase_script.md — SQL for match_format_templates table with RLS policy (coaches/owners/managers only)
+
+v1.14 03.01.2026 DRY refactor — shared utilities and constants
+- Added: constants/date_constants.dart — shared kMonthNames, kShortMonthNames, kDayNames, kWeekdayLabels constants
+- Added: utils/ui_helpers.dart — showSuccessSnackBar, showErrorSnackBar, showInfoSnackBar helper functions
+- Added: utils/validation_utils.dart — shared isPasswordStrong() function
+- Added: utils/controller_utils.dart — List<TextEditingController>.disposeAll() extension
+- Removed: duplicate _monthNames/_shortMonthNames/_dayNames/_weekdayLabels static const arrays from calendar_screen.dart, matches_screen.dart, roster_screen.dart, match_view_screen.dart
+- Removed: duplicate _isPasswordStrong() methods from login_screen.dart and reset_password_screen.dart
+- Changed: ~40 inline ScaffoldMessenger.showSnackBar constructions replaced with helpers across login_screen, reset_password_screen, account_settings_screen, add_player_screen, manage_members_screen, game_roster_screen, saved_roster_screen, team_selection_screen, roster_screen, match_view_screen
+- Changed: dispose() overrides in login_screen, reset_password_screen, account_settings_screen, add_player_screen collapsed to .disposeAll()
+
 v1.14 03.01.2026 Persist selected game roster in match view
 - Fixed: screens/match_view_screen.dart — reopening the Select Roster sheet now pre-selects the previously confirmed roster; added _selectedRosterId field to _MatchViewScreenState and initialSelectedId parameter to _SelectRosterSheet; Confirm now pops a ({String id, String name}) record so both id and name are stored; parent state only updates on explicit confirmation
 

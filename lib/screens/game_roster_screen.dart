@@ -10,9 +10,11 @@ import 'package:flutter/services.dart';
 import '../models/player.dart';
 import '../services/auth_service.dart';
 import '../services/player_service.dart';
+import '../utils/ui_helpers.dart';
 import '../widgets/error_dialog.dart';
 import '../widgets/date_input_field.dart';
 import 'account_settings_screen.dart';
+import 'match_format_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // game_roster_screen.dart  (AOD v1.4)
@@ -83,6 +85,12 @@ class _GameRosterScreenState extends State<GameRosterScreen>
   // Mutable game date — updated via the settings menu.
   late String? _gameDate;
 
+  // Active match format template (null = no format applied).
+  MatchFormatTemplate? _activeFormat;
+
+  // Format slot assignments: key = "$sectionIdx-$positionIdx", value = Player.
+  final Map<String, Player> _formatSlots = {};
+
   @override
   void initState() {
     super.initState();
@@ -116,6 +124,30 @@ class _GameRosterScreenState extends State<GameRosterScreen>
           _restorePositionOverrides(rosterData['starters']);
           _restorePositionOverrides(rosterData['substitutes']);
 
+          // Restore active match format if one was saved with this roster.
+          MatchFormatTemplate? restoredFormat;
+          final savedFormatId =
+              rosterData['match_format_template_id'] as String?;
+          if (savedFormatId != null && savedFormatId.isNotEmpty) {
+            final row = await _playerService
+                .getMatchFormatTemplateById(savedFormatId);
+            if (row != null) {
+              restoredFormat = MatchFormatTemplate.fromMap(row);
+            }
+          }
+
+          // Restore format slot assignments (key = "$sectionIdx-$positionIdx").
+          final savedFormatSlots =
+              rosterData['format_slots'] as Map<String, dynamic>?;
+          if (savedFormatSlots != null && savedFormatSlots.isNotEmpty) {
+            for (final entry in savedFormatSlots.entries) {
+              final playerId = entry.value as String?;
+              if (playerId != null && playerMap.containsKey(playerId)) {
+                _formatSlots[entry.key] = playerMap[playerId]!;
+              }
+            }
+          }
+
           setState(() {
             _allPlayers = players;
             _starters = starterIds
@@ -130,6 +162,9 @@ class _GameRosterScreenState extends State<GameRosterScreen>
             if (savedSlots is int && savedSlots > 0) {
               _starterSlots = savedSlots;
             }
+            if (restoredFormat != null) {
+              _activeFormat = restoredFormat;
+            }
             _loading = false;
           });
           return;
@@ -143,9 +178,7 @@ class _GameRosterScreenState extends State<GameRosterScreen>
     } catch (e) {
       setState(() => _loading = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading players: $e')),
-        );
+        showInfoSnackBar(context, 'Error loading players: $e');
       }
     }
   }
@@ -190,38 +223,44 @@ class _GameRosterScreenState extends State<GameRosterScreen>
   // ── Assignment ────────────────────────────────────────────────────────────
 
   void _addToStarters(Player player) {
+    if (_substitutes.any((s) => s.id == player.id)) {
+      showInfoSnackBar(context, 'Player is already on the bench. Remove them first.');
+      return;
+    }
     if (_starters.length >= _starterSlots) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-              'Lineup full ($_starterSlots spots). Adjust or bench a starter.'),
-          action: SnackBarAction(label: 'Adjust', onPressed: _showSlotDialog),
-        ),
-      );
+      showInfoSnackBar(context, 'Lineup full ($_starterSlots spots). Adjust or bench a starter.');
       return;
     }
     setState(() => _starters.add(player));
   }
 
-  void _addToSubs(Player player) => setState(() => _substitutes.add(player));
+  void _addToSubs(Player player) {
+    if (_starters.any((s) => s.id == player.id)) {
+      showInfoSnackBar(context, 'Player is already in the starting lineup. Remove them first.');
+      return;
+    }
+    setState(() => _substitutes.add(player));
+  }
+
   void _removeFromStarters(Player p) => setState(() => _starters.remove(p));
   void _removeFromSubs(Player p) => setState(() => _substitutes.remove(p));
 
   void _promoteSubToStarter(Player player) {
     if (_starters.length >= _starterSlots) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Starting lineup is full.')));
+      showInfoSnackBar(context, 'Starting lineup is full.');
       return;
     }
     setState(() {
-      _substitutes.remove(player);
+      // Remove ALL occurrences of this player from subs (handles duplicates).
+      _substitutes.removeWhere((s) => s.id == player.id);
       _starters.add(player);
     });
   }
 
   void _demoteStarterToSub(Player player) {
     setState(() {
-      _starters.remove(player);
+      // Remove ALL occurrences of this player from starters (handles duplicates).
+      _starters.removeWhere((s) => s.id == player.id);
       _substitutes.add(player);
     });
   }
@@ -520,15 +559,14 @@ class _GameRosterScreenState extends State<GameRosterScreen>
           starters: starterData,
           substitutes: subData,
           starterSlots: _starterSlots,
+          matchFormatTemplateId: _activeFormat?.id,
+          formatSlots: _formatSlots.isEmpty
+              ? null
+              : {for (final e in _formatSlots.entries) e.key: e.value.id},
         );
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Roster saved!'),
-              backgroundColor: Colors.green,
-            ),
-          );
+          showSuccessSnackBar(context, 'Roster saved!');
         }
       } catch (e) {
         if (mounted) {
@@ -581,6 +619,27 @@ class _GameRosterScreenState extends State<GameRosterScreen>
     _playerService.clearCache();
     await _authService.signOut();
     if (mounted) Navigator.popUntil(context, (route) => route.isFirst);
+  }
+
+  // ── Match Format picker ───────────────────────────────────────────────────
+
+  Future<void> _openMatchFormatPicker() async {
+    final selected = await showModalBottomSheet<MatchFormatTemplate>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _MatchFormatPickerSheet(teamId: widget.teamId),
+    );
+    if (selected != null && mounted) {
+      setState(() {
+        _activeFormat = selected;
+        _formatSlots.clear();
+      });
+      // Switch to the Roster tab so the format view is immediately visible.
+      _tabController.animateTo(1);
+    }
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -768,27 +827,72 @@ class _GameRosterScreenState extends State<GameRosterScreen>
                       _substitutes.insert(neo, p);
                     });
                   },
-                  onEditPosition: _editPositionOverride, // CHANGE (v1.4)
+                  onEditPosition: _editPositionOverride,
+                  activeFormat: _activeFormat,
+                  formatSlots: _formatSlots,
+                  onFormatSlotChanged: (key, player) {
+                    setState(() {
+                      if (player == null) {
+                        _formatSlots.remove(key);
+                      } else {
+                        _formatSlots[key] = player;
+                      }
+                    });
+                  },
                 ),
               ],
             ),
-      bottomNavigationBar: widget.onCancel != null
-          ? SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                child: OutlinedButton.icon(
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Row(
+            children: [
+              // Match Format button — always visible bottom-left.
+              OutlinedButton.icon(
+                onPressed: _openMatchFormatPicker,
+                icon: const Icon(Icons.format_list_bulleted, size: 18),
+                label: Text(
+                  _activeFormat != null
+                      ? _activeFormat!.name
+                      : 'Match Format',
+                  overflow: TextOverflow.ellipsis,
+                ),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                ),
+              ),
+              if (_activeFormat != null) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18),
+                  tooltip: 'Remove format',
+                  onPressed: () => setState(() {
+                    _activeFormat = null;
+                    _formatSlots.clear();
+                  }),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                      minWidth: 32, minHeight: 32),
+                ),
+              ],
+              const Spacer(),
+              if (widget.onCancel != null)
+                OutlinedButton.icon(
                   onPressed: widget.onCancel,
                   icon: const Icon(Icons.close),
                   label: const Text('Cancel Roster'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.red,
                     side: const BorderSide(color: Colors.red),
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
                   ),
                 ),
-              ),
-            )
-          : null,
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -893,7 +997,10 @@ class _RosterTabView extends StatefulWidget {
   final ValueChanged<Player> onPromote;
   final void Function(int, int) onReorderStarters;
   final void Function(int, int) onReorderSubs;
-  final ValueChanged<Player> onEditPosition; // CHANGE (v1.4)
+  final ValueChanged<Player> onEditPosition;
+  final MatchFormatTemplate? activeFormat;
+  final Map<String, Player> formatSlots;
+  final void Function(String key, Player? player) onFormatSlotChanged;
 
   const _RosterTabView({
     required this.starters,
@@ -909,6 +1016,9 @@ class _RosterTabView extends StatefulWidget {
     required this.onReorderStarters,
     required this.onReorderSubs,
     required this.onEditPosition,
+    required this.activeFormat,
+    required this.formatSlots,
+    required this.onFormatSlotChanged,
   });
 
   @override
@@ -926,72 +1036,331 @@ class _RosterTabViewState extends State<_RosterTabView>
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin.
 
+    if (widget.activeFormat != null) {
+      return _buildFormatLayout(context);
+    }
+
     final theme = Theme.of(context);
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _sectionHeader(
-            context: context,
-            label: 'Starting Lineup',
-            count: widget.starters.length,
-            max: widget.starterSlots,
-            color: theme.colorScheme.primary,
-            icon: Icons.star,
+
+    // Count how many times each player id appears across starters + subs.
+    final appearanceCounts = <String, int>{};
+    for (final p in [...widget.starters, ...widget.substitutes]) {
+      appearanceCounts[p.id] = (appearanceCounts[p.id] ?? 0) + 1;
+    }
+
+    // Split into two fixed halves so both zones are always visible on screen —
+    // a SingleChildScrollView would scroll the subs zone out of reach during drag.
+    return Column(
+      children: [
+        // ── Starting Lineup (top half) ─────────────────────────────────────
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _sectionHeader(
+                  context: context,
+                  label: 'Starting Lineup',
+                  count: widget.starters.length,
+                  max: widget.starterSlots,
+                  color: theme.colorScheme.primary,
+                  icon: Icons.star,
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: _StarterDropZone(
+                    starters: widget.starters,
+                    substitutes: widget.substitutes,
+                    starterSlots: widget.starterSlots,
+                    positionOverrides: widget.positionOverrides,
+                    appearanceCounts: appearanceCounts,
+                    onDropPlayer: (player) {
+                      if (widget.substitutes.any((s) => s.id == player.id)) {
+                        widget.onPromote(player);
+                      } else {
+                        widget.onDropToStarters(player);
+                      }
+                    },
+                    onRemove: widget.onRemoveStarter,
+                    onSendToBench: widget.onSendToBench,
+                    onEditPosition: widget.onEditPosition,
+                    onReorder: widget.onReorderStarters,
+                  ),
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 8),
-          _StarterDropZone(
-            starters: widget.starters,
-            starterSlots: widget.starterSlots,
-            positionOverrides: widget.positionOverrides,
-            onDropPlayer: widget.onDropToStarters,
-            onRemove: widget.onRemoveStarter,
-            onSendToBench: widget.onSendToBench,
-            onEditPosition: widget.onEditPosition,
-            onReorder: widget.onReorderStarters,
+        ),
+        const Divider(height: 1, thickness: 1),
+        // ── Substitutes Bench (bottom half) ───────────────────────────────
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _sectionHeader(
+                  context: context,
+                  label: 'Substitutes Bench',
+                  count: widget.substitutes.length,
+                  max: null,
+                  color: theme.colorScheme.secondary,
+                  icon: Icons.airline_seat_recline_normal,
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: _SubsDropZone(
+                    substitutes: widget.substitutes,
+                    starters: widget.starters,
+                    positionOverrides: widget.positionOverrides,
+                    appearanceCounts: appearanceCounts,
+                    onDropPlayer: (player) {
+                      if (widget.starters.any((s) => s.id == player.id)) {
+                        widget.onSendToBench(player);
+                      } else {
+                        widget.onDropToSubs(player);
+                      }
+                    },
+                    onRemove: widget.onRemoveSub,
+                    onPromote: widget.onPromote,
+                    onEditPosition: widget.onEditPosition,
+                    onReorder: widget.onReorderSubs,
+                  ),
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 24),
-          _sectionHeader(
-            context: context,
-            label: 'Substitutes Bench',
-            count: widget.substitutes.length,
-            max: null,
-            color: theme.colorScheme.secondary,
-            icon: Icons.airline_seat_recline_normal,
-          ),
-          const SizedBox(height: 8),
-          _SubsDropZone(
-            substitutes: widget.substitutes,
-            positionOverrides: widget.positionOverrides,
-            onDropPlayer: widget.onDropToSubs,
-            onRemove: widget.onRemoveSub,
-            onPromote: widget.onPromote,
-            onEditPosition: widget.onEditPosition,
-            onReorder: widget.onReorderSubs,
-          ),
-          if (widget.starters.isEmpty && widget.substitutes.isEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 32),
-              child: Center(
-                child: Column(
-                  children: [
-                    Icon(Icons.assignment, size: 64, color: Colors.grey[400]),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Your roster is empty.\n'
-                      'Go to the Available tab to add players.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey[600]),
+        ),
+      ],
+    );
+  }
+
+  // ── Format-based split layout ─────────────────────────────────────────────
+  // Shows sections + empty position slots on the left, and the
+  // starters/substitutes list on the right.  Tapping a slot picks a player
+  // from the right-side list; tapping an occupied slot clears it.
+  Widget _buildFormatLayout(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final format = widget.activeFormat!;
+
+    // Count how many format slots each player id is assigned to.
+    final formatSlotCounts = <String, int>{};
+    for (final p in widget.formatSlots.values) {
+      formatSlotCounts[p.id] = (formatSlotCounts[p.id] ?? 0) + 1;
+    }
+    final assignedIds = formatSlotCounts.keys.toSet();
+
+    // All roster players are assignable — already-assigned players can be
+    // dragged to additional slots (duplicates allowed in the format layout).
+    final assignable = [
+      ...widget.starters,
+      ...widget.substitutes,
+    ];
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── Left: sections + position slots ───────────────────────────────
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
+            itemCount: format.sections.length,
+            itemBuilder: (ctx, sIdx) {
+              final section = format.sections[sIdx];
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Section header
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: cs.primary,
+                      borderRadius: BorderRadius.circular(6),
                     ),
+                    child: Text(
+                      section.title,
+                      style: theme.textTheme.labelLarge?.copyWith(
+                          color: cs.onPrimary,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  // Position slots
+                  for (int pIdx = 0;
+                      pIdx < section.positionCount;
+                      pIdx++) ...[
+                    _FormatPositionSlot(
+                      slotKey: '$sIdx-$pIdx',
+                      positionNumber: pIdx + 1,
+                      assignedPlayer:
+                          widget.formatSlots['$sIdx-$pIdx'],
+                      assignablePlayers: assignable,
+                      onAssign: (p) =>
+                          widget.onFormatSlotChanged('$sIdx-$pIdx', p),
+                      onClear: () =>
+                          widget.onFormatSlotChanged('$sIdx-$pIdx', null),
+                    ),
+                    const SizedBox(height: 4),
                   ],
+                  const SizedBox(height: 12),
+                ],
+              );
+            },
+          ),
+        ),
+
+        // Divider
+        VerticalDivider(width: 1, color: cs.outlineVariant),
+
+        // ── Right: starters / substitutes list ────────────────────────────
+        // Split into two DragTarget halves so players can be promoted/demoted
+        // by dragging between sections even while a format is active.
+        Expanded(
+          child: Column(
+            children: [
+              // Starters section — drop a sub here to promote them.
+              Expanded(
+                child: DragTarget<Player>(
+                  onWillAcceptWithDetails: (d) =>
+                      widget.substitutes.any((s) => s.id == d.data.id),
+                  onAcceptWithDetails: (d) => widget.onPromote(d.data),
+                  builder: (_, candidateData, __) {
+                    final isHovering = candidateData.isNotEmpty;
+                    return AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      margin: const EdgeInsets.fromLTRB(6, 12, 12, 4),
+                      decoration: BoxDecoration(
+                        color: isHovering
+                            ? cs.primary.withValues(alpha: 0.07)
+                            : cs.surface,
+                        border: Border.all(
+                          color: isHovering
+                              ? cs.primary
+                              : cs.outline.withValues(alpha: 0.12),
+                          width: isHovering ? 2 : 1,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
+                            child: _formatSideHeader(
+                                context, 'Starters', Icons.star, cs.primary),
+                          ),
+                          Expanded(
+                            child: widget.starters.isEmpty
+                                ? Center(child: _emptyHint('No starters assigned'))
+                                : ListView(
+                                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                                    children: [
+                                      for (final p in widget.starters)
+                                        _FormatPlayerTile(
+                                          player: p,
+                                          isAssigned: assignedIds.contains(p.id),
+                                          slotCount: formatSlotCounts[p.id] ?? 0,
+                                        ),
+                                    ],
+                                  ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               ),
-            ),
+              // Substitutes section — drop a starter here to bench them.
+              Expanded(
+                child: DragTarget<Player>(
+                  onWillAcceptWithDetails: (d) =>
+                      widget.starters.any((s) => s.id == d.data.id),
+                  onAcceptWithDetails: (d) => widget.onSendToBench(d.data),
+                  builder: (_, candidateData, __) {
+                    final isHovering = candidateData.isNotEmpty;
+                    return AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      margin: const EdgeInsets.fromLTRB(6, 4, 12, 12),
+                      decoration: BoxDecoration(
+                        color: isHovering
+                            ? cs.secondary.withValues(alpha: 0.07)
+                            : cs.surface,
+                        border: Border.all(
+                          color: isHovering
+                              ? cs.secondary
+                              : cs.outline.withValues(alpha: 0.12),
+                          width: isHovering ? 2 : 1,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
+                            child: _formatSideHeader(
+                                context,
+                                'Substitutes',
+                                Icons.airline_seat_recline_normal,
+                                cs.secondary),
+                          ),
+                          Expanded(
+                            child: widget.substitutes.isEmpty
+                                ? Center(child: _emptyHint('No substitutes assigned'))
+                                : ListView(
+                                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                                    children: [
+                                      for (final p in widget.substitutes)
+                                        _FormatPlayerTile(
+                                          player: p,
+                                          isAssigned: assignedIds.contains(p.id),
+                                          slotCount: formatSlotCounts[p.id] ?? 0,
+                                        ),
+                                    ],
+                                  ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _formatSideHeader(
+      BuildContext context, String label, IconData icon, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(label,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: color,
+                  )),
         ],
       ),
     );
   }
+
+  Widget _emptyHint(String text) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Text(text,
+            style: TextStyle(
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+                color: Colors.grey[500])),
+      );
 
   Widget _sectionHeader({
     required BuildContext context,
@@ -1027,6 +1396,501 @@ class _RosterTabViewState extends State<_RosterTabView>
           ),
         ),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _FormatPositionSlot — one position slot in the format layout (left side).
+// Shows empty (dashed) or the assigned player's name.
+// Tapping an empty slot opens a picker; tapping an occupied slot clears it.
+// ─────────────────────────────────────────────────────────────────────────────
+class _FormatPositionSlot extends StatelessWidget {
+  final String slotKey;
+  final int positionNumber;
+  final Player? assignedPlayer;
+  final List<Player> assignablePlayers;
+  final ValueChanged<Player> onAssign;
+  final VoidCallback onClear;
+
+  const _FormatPositionSlot({
+    required this.slotKey,
+    required this.positionNumber,
+    required this.assignedPlayer,
+    required this.assignablePlayers,
+    required this.onAssign,
+    required this.onClear,
+  });
+
+  Future<void> _pick(BuildContext context) async {
+    if (assignedPlayer != null) {
+      onClear();
+      return;
+    }
+    if (assignablePlayers.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('No unassigned players. Add players in the Available tab.')),
+      );
+      return;
+    }
+    final picked = await showModalBottomSheet<Player>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.85,
+        builder: (ctx, scrollCtrl) => Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Text('Assign to Position $positionNumber',
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.builder(
+                controller: scrollCtrl,
+                itemCount: assignablePlayers.length,
+                itemBuilder: (_, i) {
+                  final p = assignablePlayers[i];
+                  return ListTile(
+                    leading: CircleAvatar(child: Text(p.name[0])),
+                    title: Text(p.name),
+                    subtitle: p.position != null
+                        ? Text(p.position!)
+                        : null,
+                    onTap: () => Navigator.pop(ctx, p),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (picked != null) onAssign(picked);
+  }
+
+  Widget _buildSlot(BuildContext context, {bool isHovering = false}) {
+    final cs = Theme.of(context).colorScheme;
+    final isEmpty = assignedPlayer == null;
+
+    return GestureDetector(
+      onTap: () => _pick(context),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        height: 40,
+        decoration: BoxDecoration(
+          color: isHovering
+              ? cs.primary.withValues(alpha: 0.12)
+              : isEmpty
+                  ? cs.surface
+                  : cs.primaryContainer.withValues(alpha: 0.6),
+          border: Border.all(
+            color: isHovering
+                ? cs.primary
+                : isEmpty
+                    ? cs.outline.withValues(alpha: 0.5)
+                    : cs.primary,
+            width: isHovering ? 2 : isEmpty ? 1 : 1.5,
+          ),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 28,
+              alignment: Alignment.center,
+              child: Text(
+                '$positionNumber',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: cs.onSurfaceVariant),
+              ),
+            ),
+            const VerticalDivider(width: 1),
+            const SizedBox(width: 8),
+            Expanded(
+              child: isEmpty
+                  ? Text(
+                      isHovering ? 'Drop here' : 'Empty',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: isHovering
+                              ? cs.primary
+                              : cs.onSurface.withValues(alpha: 0.4),
+                          fontStyle: FontStyle.italic),
+                    )
+                  : Text(
+                      assignedPlayer!.name,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+            ),
+            if (!isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: Icon(Icons.close,
+                    size: 14,
+                    color: cs.onSurface.withValues(alpha: 0.5)),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DragTarget<Player>(
+      onWillAcceptWithDetails: (d) =>
+          assignedPlayer == null && assignablePlayers.contains(d.data),
+      onAcceptWithDetails: (d) => onAssign(d.data),
+      builder: (context, candidateData, rejectedData) =>
+          _buildSlot(context, isHovering: candidateData.isNotEmpty),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _FormatPlayerTile — player tile in the right-side list of the format layout.
+// Dimmed when already assigned to a slot.
+// ─────────────────────────────────────────────────────────────────────────────
+class _FormatPlayerTile extends StatelessWidget {
+  final Player player;
+  final bool isAssigned;
+  final int slotCount;
+
+  const _FormatPlayerTile({
+    required this.player,
+    required this.isAssigned,
+    required this.slotCount,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tile = Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isAssigned
+              ? cs.surfaceContainerHighest.withValues(alpha: 0.65)
+              : cs.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 12,
+              backgroundColor: isAssigned
+                  ? cs.primary.withValues(alpha: 0.55)
+                  : cs.primary,
+              child: Text(
+                player.name[0],
+                style: TextStyle(
+                    fontSize: 11,
+                    color: isAssigned
+                        ? cs.onPrimary.withValues(alpha: 0.75)
+                        : cs.onPrimary),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      player.name,
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: isAssigned
+                              ? cs.onSurface.withValues(alpha: 0.65)
+                              : null),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (slotCount > 1) ...[
+                    const SizedBox(width: 4),
+                    Tooltip(
+                      message: 'Assigned to $slotCount positions',
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.shade700,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.warning_amber_rounded,
+                                size: 11, color: Colors.white),
+                            const SizedBox(width: 2),
+                            Text(
+                              '$slotCount',
+                              style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            // Always show drag handle; add checkmark alongside it when assigned.
+            if (isAssigned)
+              Icon(Icons.check_circle,
+                  size: 13,
+                  color: cs.primary.withValues(alpha: 0.7)),
+            const SizedBox(width: 2),
+            Icon(Icons.drag_indicator,
+                size: 14,
+                color: cs.onSurface.withValues(alpha: isAssigned ? 0.45 : 0.3)),
+          ],
+        ),
+      ),
+    );
+
+    // Always draggable — allows the same player to be assigned to multiple slots.
+    return LongPressDraggable<Player>(
+      data: player,
+      feedback: Material(
+        elevation: 4,
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: cs.primaryContainer,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Text(player.name,
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: cs.onPrimaryContainer)),
+        ),
+      ),
+      childWhenDragging: Opacity(opacity: 0.3, child: tile),
+      child: tile,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _MatchFormatPickerSheet — bottom sheet shown when tapping "Match Format".
+// Loads saved templates for the team and lets the user pick one.
+// ─────────────────────────────────────────────────────────────────────────────
+class _MatchFormatPickerSheet extends StatefulWidget {
+  final String teamId;
+
+  const _MatchFormatPickerSheet({required this.teamId});
+
+  @override
+  State<_MatchFormatPickerSheet> createState() =>
+      _MatchFormatPickerSheetState();
+}
+
+class _MatchFormatPickerSheetState extends State<_MatchFormatPickerSheet> {
+  final _service = PlayerService();
+  List<MatchFormatTemplate> _templates = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final rows = await _service.getMatchFormatTemplates(widget.teamId);
+      if (mounted) {
+        setState(() {
+          _templates = rows.map(MatchFormatTemplate.fromMap).toList();
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
+  Future<void> _openEdit(MatchFormatTemplate t) async {
+    final updated = await showModalBottomSheet<MatchFormatTemplate>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => EditFormatSheet(
+            template: t,
+            onDeleted: () {
+              if (mounted) {
+                setState(() => _templates.removeWhere((x) => x.id == t.id));
+              }
+            },
+          ),
+    );
+    if (updated != null && mounted) {
+      setState(() {
+        final i = _templates.indexWhere((x) => x.id == updated.id);
+        if (i != -1) _templates[i] = updated;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.55,
+      minChildSize: 0.35,
+      maxChildSize: 0.85,
+      builder: (_, scrollCtrl) => Column(
+        children: [
+          const SizedBox(height: 12),
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: cs.onSurface.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+            child: Row(
+              children: [
+                Text('Select Match Format',
+                    style: tt.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.bold)),
+                const Spacer(),
+                TextButton.icon(
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('New'),
+                  onPressed: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) =>
+                              MatchFormatScreen(teamId: widget.teamId)),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('Error loading formats',
+                                style: TextStyle(color: cs.error)),
+                            TextButton(
+                                onPressed: _load, child: const Text('Retry')),
+                          ],
+                        ),
+                      )
+                    : _templates.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.format_list_bulleted_outlined,
+                                    size: 48,
+                                    color: cs.onSurface.withValues(alpha: 0.3)),
+                                const SizedBox(height: 10),
+                                Text('No formats yet',
+                                    style: TextStyle(
+                                        color: cs.onSurface
+                                            .withValues(alpha: 0.5))),
+                                const SizedBox(height: 8),
+                                FilledButton.icon(
+                                  icon: const Icon(Icons.add, size: 16),
+                                  label: const Text('Create Format'),
+                                  onPressed: () {
+                                    Navigator.pop(context);
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                          builder: (_) => MatchFormatScreen(
+                                              teamId: widget.teamId)),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          )
+                        : ListView.separated(
+                            controller: scrollCtrl,
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            itemCount: _templates.length,
+                            separatorBuilder: (context, index) =>
+                                const Divider(height: 1),
+                            itemBuilder: (_, i) {
+                              final t = _templates[i];
+                              return ListTile(
+                                leading: const Icon(
+                                    Icons.format_list_bulleted_outlined),
+                                title: Text(t.name,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w600)),
+                                subtitle: Text(
+                                  '${t.sections.length} section${t.sections.length == 1 ? '' : 's'}',
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.edit_outlined),
+                                      tooltip: 'Edit',
+                                      onPressed: () => _openEdit(t),
+                                    ),
+                                    const Icon(Icons.chevron_right),
+                                  ],
+                                ),
+                                onTap: () => Navigator.pop(context, t),
+                              );
+                            },
+                          ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1154,8 +2018,10 @@ class _DraggablePlayerCard extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class _StarterDropZone extends StatelessWidget {
   final List<Player> starters;
+  final List<Player> substitutes;
   final int starterSlots;
   final Map<String, String> positionOverrides;
+  final Map<String, int> appearanceCounts;
   final ValueChanged<Player> onDropPlayer;
   final ValueChanged<Player> onRemove;
   final ValueChanged<Player> onSendToBench;
@@ -1164,8 +2030,10 @@ class _StarterDropZone extends StatelessWidget {
 
   const _StarterDropZone({
     required this.starters,
+    required this.substitutes,
     required this.starterSlots,
     required this.positionOverrides,
+    required this.appearanceCounts,
     required this.onDropPlayer,
     required this.onRemove,
     required this.onSendToBench,
@@ -1179,8 +2047,9 @@ class _StarterDropZone extends StatelessWidget {
     final isFull = starters.length >= starterSlots;
 
     return DragTarget<Player>(
-      onWillAcceptWithDetails: (d) =>
-          !starters.contains(d.data) && !isFull,
+      // Accept if not full. Cross-side (subs) drops are handled as promotions.
+      // Same-side drops create a duplicate entry.
+      onWillAcceptWithDetails: (d) => !isFull,
       onAcceptWithDetails: (d) => onDropPlayer(d.data),
       builder: (_, candidateData, _) {
         final isHovering = candidateData.isNotEmpty;
@@ -1188,20 +2057,30 @@ class _StarterDropZone extends StatelessWidget {
           duration: const Duration(milliseconds: 150),
           decoration: BoxDecoration(
             color: isHovering
-                ? theme.colorScheme.primary.withValues(alpha: 0.08)
+                ? Colors.blue.withValues(alpha: 0.07)
                 : theme.colorScheme.surface,
             border: Border.all(
               color: isHovering
-                  ? theme.colorScheme.primary
-                  : theme.colorScheme.outline.withValues(alpha: 0.03),
-              width: isHovering ? 2 : 1,
+                  ? Colors.blue
+                  : theme.colorScheme.outline.withValues(alpha: 0.12),
+              width: isHovering ? 2.5 : 1,
             ),
             borderRadius: BorderRadius.circular(12),
+            boxShadow: isHovering
+                ? [
+                    BoxShadow(
+                      color: Colors.blue.withValues(alpha: 0.25),
+                      blurRadius: 10,
+                      spreadRadius: 1,
+                    )
+                  ]
+                : null,
           ),
-          child: starters.isEmpty
-              ? Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Center(
+          // SizedBox.expand fills the Expanded parent so the drop zone is
+          // always full-height and reachable by a dragged player.
+          child: SizedBox.expand(
+            child: starters.isEmpty
+                ? Center(
                     child: Text(
                       isFull
                           ? 'Lineup full'
@@ -1211,44 +2090,43 @@ class _StarterDropZone extends StatelessWidget {
                           fontStyle: FontStyle.italic),
                       textAlign: TextAlign.center,
                     ),
+                  )
+                : ReorderableListView.builder(
+                    itemCount: starters.length,
+                    onReorder: onReorder,
+                    itemBuilder: (_, i) {
+                      final p = starters[i];
+                      return _RosterRowTile(
+                        key: ValueKey('starter-$i'),
+                        player: p,
+                        slotNumber: i + 1,
+                        accentColor: theme.colorScheme.primary,
+                        positionOverrides: positionOverrides,
+                        appearanceCount: appearanceCounts[p.id] ?? 1,
+                        onEditPosition: onEditPosition,
+                        trailingActions: [
+                          Tooltip(
+                            message: 'Move to bench',
+                            child: IconButton(
+                              icon: const Icon(
+                                  Icons.airline_seat_recline_normal,
+                                  size: 18),
+                              onPressed: () => onSendToBench(p),
+                            ),
+                          ),
+                          Tooltip(
+                            message: 'Remove',
+                            child: IconButton(
+                              icon: const Icon(Icons.close, size: 18),
+                              color: Colors.red,
+                              onPressed: () => onRemove(p),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
-                )
-              : ReorderableListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: starters.length,
-                  onReorder: onReorder,
-                  itemBuilder: (_, i) {
-                    final p = starters[i];
-                    return _RosterRowTile(
-                      key: ValueKey(p.id),
-                      player: p,
-                      slotNumber: i + 1,
-                      accentColor: theme.colorScheme.primary,
-                      positionOverrides: positionOverrides,
-                      onEditPosition: onEditPosition,
-                      trailingActions: [
-                        Tooltip(
-                          message: 'Move to bench',
-                          child: IconButton(
-                            icon: const Icon(
-                                Icons.airline_seat_recline_normal,
-                                size: 18),
-                            onPressed: () => onSendToBench(p),
-                          ),
-                        ),
-                        Tooltip(
-                          message: 'Remove',
-                          child: IconButton(
-                            icon: const Icon(Icons.close, size: 18),
-                            color: Colors.red,
-                            onPressed: () => onRemove(p),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
+          ),
         );
       },
     );
@@ -1260,7 +2138,9 @@ class _StarterDropZone extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class _SubsDropZone extends StatelessWidget {
   final List<Player> substitutes;
+  final List<Player> starters;
   final Map<String, String> positionOverrides;
+  final Map<String, int> appearanceCounts;
   final ValueChanged<Player> onDropPlayer;
   final ValueChanged<Player> onRemove;
   final ValueChanged<Player> onPromote;
@@ -1269,7 +2149,9 @@ class _SubsDropZone extends StatelessWidget {
 
   const _SubsDropZone({
     required this.substitutes,
+    required this.starters,
     required this.positionOverrides,
+    required this.appearanceCounts,
     required this.onDropPlayer,
     required this.onRemove,
     required this.onPromote,
@@ -1281,7 +2163,9 @@ class _SubsDropZone extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return DragTarget<Player>(
-      onWillAcceptWithDetails: (d) => !substitutes.contains(d.data),
+      // Always accept. Cross-side (starters) drops are handled as demotions.
+      // Same-side drops create a duplicate entry.
+      onWillAcceptWithDetails: (d) => true,
       onAcceptWithDetails: (d) => onDropPlayer(d.data),
       builder: (_, candidateData, _) {
         final isHovering = candidateData.isNotEmpty;
@@ -1289,20 +2173,28 @@ class _SubsDropZone extends StatelessWidget {
           duration: const Duration(milliseconds: 150),
           decoration: BoxDecoration(
             color: isHovering
-                ? theme.colorScheme.secondary.withValues(alpha: 0.08)
+                ? Colors.blue.withValues(alpha: 0.07)
                 : theme.colorScheme.surface,
             border: Border.all(
               color: isHovering
-                  ? theme.colorScheme.secondary
-                  : theme.colorScheme.outline.withValues(alpha: 0.03),
-              width: isHovering ? 2 : 1,
+                  ? Colors.blue
+                  : theme.colorScheme.outline.withValues(alpha: 0.12),
+              width: isHovering ? 2.5 : 1,
             ),
             borderRadius: BorderRadius.circular(12),
+            boxShadow: isHovering
+                ? [
+                    BoxShadow(
+                      color: Colors.blue.withValues(alpha: 0.25),
+                      blurRadius: 10,
+                      spreadRadius: 1,
+                    )
+                  ]
+                : null,
           ),
-          child: substitutes.isEmpty
-              ? Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Center(
+          child: SizedBox.expand(
+            child: substitutes.isEmpty
+                ? Center(
                     child: Text(
                       'Drag players here or tap the bench icon on the '
                       'Available tab',
@@ -1311,42 +2203,41 @@ class _SubsDropZone extends StatelessWidget {
                           fontStyle: FontStyle.italic),
                       textAlign: TextAlign.center,
                     ),
+                  )
+                : ReorderableListView.builder(
+                    itemCount: substitutes.length,
+                    onReorder: onReorder,
+                    itemBuilder: (_, i) {
+                      final p = substitutes[i];
+                      return _RosterRowTile(
+                        key: ValueKey('sub-$i'),
+                        player: p,
+                        slotNumber: i + 1,
+                        accentColor: theme.colorScheme.secondary,
+                        positionOverrides: positionOverrides,
+                        appearanceCount: appearanceCounts[p.id] ?? 1,
+                        onEditPosition: onEditPosition,
+                        trailingActions: [
+                          Tooltip(
+                            message: 'Promote to starter',
+                            child: IconButton(
+                              icon: const Icon(Icons.star_outline, size: 18),
+                              onPressed: () => onPromote(p),
+                            ),
+                          ),
+                          Tooltip(
+                            message: 'Remove from bench',
+                            child: IconButton(
+                              icon: const Icon(Icons.close, size: 18),
+                              color: Colors.red,
+                              onPressed: () => onRemove(p),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
-                )
-              : ReorderableListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: substitutes.length,
-                  onReorder: onReorder,
-                  itemBuilder: (_, i) {
-                    final p = substitutes[i];
-                    return _RosterRowTile(
-                      key: ValueKey(p.id),
-                      player: p,
-                      slotNumber: i + 1,
-                      accentColor: theme.colorScheme.secondary,
-                      positionOverrides: positionOverrides,
-                      onEditPosition: onEditPosition,
-                      trailingActions: [
-                        Tooltip(
-                          message: 'Promote to starter',
-                          child: IconButton(
-                            icon: const Icon(Icons.star_outline, size: 18),
-                            onPressed: () => onPromote(p),
-                          ),
-                        ),
-                        Tooltip(
-                          message: 'Remove from bench',
-                          child: IconButton(
-                            icon: const Icon(Icons.close, size: 18),
-                            color: Colors.red,
-                            onPressed: () => onRemove(p),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
+          ),
         );
       },
     );
@@ -1364,6 +2255,7 @@ class _RosterRowTile extends StatelessWidget {
   final int slotNumber;
   final Color accentColor;
   final Map<String, String> positionOverrides;
+  final int appearanceCount;
   final ValueChanged<Player> onEditPosition;
   final List<Widget> trailingActions;
 
@@ -1373,6 +2265,7 @@ class _RosterRowTile extends StatelessWidget {
     required this.slotNumber,
     required this.accentColor,
     required this.positionOverrides,
+    required this.appearanceCount,
     required this.onEditPosition,
     required this.trailingActions,
   });
@@ -1390,7 +2283,48 @@ class _RosterRowTile extends StatelessWidget {
       leading: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.drag_handle, color: Colors.grey, size: 20),
+          // Draggable handle: immediate drag = cross-section move.
+          // Long-press anywhere else on the tile = within-section reorder
+          // (handled by ReorderableListView's delayed drag recogniser).
+          Draggable<Player>(
+            data: player,
+            feedback: Material(
+              elevation: 4,
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: accentColor.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircleAvatar(
+                      radius: 12,
+                      backgroundColor: accentColor,
+                      child: Text(
+                        player.jerseyNumber ?? '?',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(player.name,
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold, color: accentColor)),
+                  ],
+                ),
+              ),
+            ),
+            childWhenDragging: const Opacity(
+              opacity: 0.3,
+              child: Icon(Icons.drag_handle, color: Colors.grey, size: 20),
+            ),
+            child: const Icon(Icons.drag_handle, color: Colors.grey, size: 20),
+          ),
           const SizedBox(width: 6),
           CircleAvatar(
             radius: 16,
@@ -1406,8 +2340,44 @@ class _RosterRowTile extends StatelessWidget {
           ),
         ],
       ),
-      title: Text(player.name,
-          style: const TextStyle(fontWeight: FontWeight.w500)),
+      title: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(player.name,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w500)),
+          ),
+          if (appearanceCount > 1) ...[
+            const SizedBox(width: 4),
+            Tooltip(
+              message: 'Assigned to $appearanceCount positions',
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade700,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.warning_amber_rounded,
+                        size: 12, color: Colors.white),
+                    const SizedBox(width: 2),
+                    Text(
+                      '$appearanceCount',
+                      style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
       // CHANGE (v1.4): Position chip — tappable to edit.
       subtitle: GestureDetector(
         onTap: () => onEditPosition(player),

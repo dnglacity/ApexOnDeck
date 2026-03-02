@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import '../models/player.dart';
 import '../services/auth_service.dart';
 import '../services/player_service.dart';
+import '../utils/controller_utils.dart';
+import '../utils/ui_helpers.dart';
 import '../widgets/error_dialog.dart';
 import 'account_settings_screen.dart';
 
@@ -125,14 +127,15 @@ class _AddPlayerScreenState extends State<AddPlayerScreen> {
 
   @override
   void dispose() {
-    // Dispose all controllers when the widget leaves the tree.
-    _emailLookupController.dispose();
-    _firstNameController.dispose();
-    _lastNameController.dispose();
-    _jerseyController.dispose();
-    _positionController.dispose();
-    _nicknameController.dispose();
-    _guardianController.dispose();
+    [
+      _emailLookupController,
+      _firstNameController,
+      _lastNameController,
+      _jerseyController,
+      _positionController,
+      _nicknameController,
+      _guardianController,
+    ].disposeAll();
     super.dispose();
   }
 
@@ -312,14 +315,7 @@ class _AddPlayerScreenState extends State<AddPlayerScreen> {
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(widget.playerToEdit == null
-                ? '$fullName added to roster!'
-                : '$fullName updated!'),
-            backgroundColor: Colors.green,
-          ),
-        );
+        showSuccessSnackBar(context, widget.playerToEdit == null ? '$fullName added to roster!' : '$fullName updated!');
         Navigator.pop(context, true);
       }
     } catch (e) {
@@ -343,27 +339,11 @@ class _AddPlayerScreenState extends State<AddPlayerScreen> {
         playerId:    playerId,
         playerEmail: email,
       );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('$email linked to player account.'),
-            backgroundColor: Colors.teal,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+      if (mounted) showInfoSnackBar(context, '$email linked to player account.', duration: const Duration(seconds: 3));
     } catch (_) {
       // Non-fatal — the athlete may not have registered yet.
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Player saved. Account link skipped — '
-              'the athlete may not have registered yet.',
-            ),
-            duration: Duration(seconds: 4),
-          ),
-        );
+        showInfoSnackBar(context, 'Player saved. Account link skipped — the athlete may not have registered yet.');
       }
     }
   }

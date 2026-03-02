@@ -837,17 +837,23 @@ class PlayerService {
   }
 
   /// Updates the starters, substitutes, and starter_slots on a roster row.
+  /// [formatSlots] is an optional map of "$sectionIdx-$positionIdx" → playerId
+  /// that persists format-template position assignments.
   Future<void> updateGameRosterLineup({
     required String rosterId,
     required List<Map<String, dynamic>> starters,
     required List<Map<String, dynamic>> substitutes,
     required int starterSlots,
+    String? matchFormatTemplateId,
+    Map<String, String>? formatSlots,
   }) async {
     try {
       await _supabase.from('game_rosters').update({
         'starters':     starters,
         'substitutes':  substitutes,
         'starter_slots': starterSlots,
+        'match_format_template_id': matchFormatTemplateId,
+        'format_slots': formatSlots ?? {},
       }).eq('id', rosterId);
     } catch (e) {
       _dbError(e, 'Error updating game roster lineup.');
@@ -1021,6 +1027,92 @@ class PlayerService {
       await _supabase.from('matches').delete().eq('id', matchId);
     } catch (e) {
       _dbError(e, 'Error deleting match.');
+    }
+  }
+
+  // ===========================================================================
+  // MATCH FORMAT TEMPLATES
+  // ===========================================================================
+
+  /// Returns all match format templates for [teamId], newest first.
+  Future<List<Map<String, dynamic>>> getMatchFormatTemplates(
+      String teamId) async {
+    try {
+      final response = await _supabase
+          .from('match_format_templates')
+          .select('id, team_id, name, sections, created_at')
+          .eq('team_id', teamId)
+          .order('created_at', ascending: false);
+      return (response as List<dynamic>).cast<Map<String, dynamic>>();
+    } catch (e) {
+      _dbError(e, 'Error fetching match format templates.');
+    }
+  }
+
+  /// Returns a single match format template by [templateId], or null.
+  Future<Map<String, dynamic>?> getMatchFormatTemplateById(
+      String templateId) async {
+    try {
+      return await _supabase
+          .from('match_format_templates')
+          .select('id, team_id, name, sections, created_at')
+          .eq('id', templateId)
+          .maybeSingle();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// Inserts a new match format template and returns the full inserted row.
+  Future<Map<String, dynamic>> createMatchFormatTemplate({
+    required String teamId,
+    required String name,
+    required List<Map<String, dynamic>> sections,
+  }) async {
+    try {
+      final result = await _supabase
+          .from('match_format_templates')
+          .insert({
+            'team_id': teamId,
+            'name': name,
+            'sections': sections,
+          })
+          .select('id, team_id, name, sections, created_at')
+          .single();
+      return result;
+    } catch (e) {
+      _dbError(e, 'Error creating match format template.');
+    }
+  }
+
+  /// Updates the name and sections of an existing match format template.
+  Future<Map<String, dynamic>> updateMatchFormatTemplate({
+    required String templateId,
+    required String name,
+    required List<Map<String, dynamic>> sections,
+  }) async {
+    try {
+      final result = await _supabase
+          .from('match_format_templates')
+          .update({'name': name, 'sections': sections})
+          .eq('id', templateId)
+          .select('id, team_id, name, sections, created_at')
+          .single();
+      return result;
+    } catch (e) {
+      _dbError(e, 'Error updating match format template.');
+    }
+  }
+
+  /// Deletes a match format template by [templateId].
+  Future<void> deleteMatchFormatTemplate(String templateId) async {
+    try {
+      await _supabase
+          .from('match_format_templates')
+          .delete()
+          .eq('id', templateId);
+    } catch (e) {
+      _dbError(e, 'Error deleting match format template.');
     }
   }
 
