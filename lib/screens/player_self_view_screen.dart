@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/player.dart';
 import '../services/auth_service.dart';
 import '../services/player_service.dart';
+import 'account_settings_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // player_self_view_screen.dart  (AOD v1.5)
@@ -124,10 +125,28 @@ class _PlayerSelfViewScreenState extends State<PlayerSelfViewScreen> {
         ),
         actions: [
           PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
             onSelected: (value) async {
-              if (value == 'logout') await _performLogout();
+              if (value == 'accountSettings') {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const AccountSettingsScreen()),
+                );
+              } else if (value == 'logout') {
+                await _performLogout();
+              }
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'accountSettings',
+                child: Row(children: [
+                  Icon(Icons.manage_accounts, size: 20),
+                  SizedBox(width: 12),
+                  Text('Account Settings'),
+                ]),
+              ),
+              PopupMenuDivider(),
               PopupMenuItem(
                 value: 'logout',
                 child: Row(children: [

@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../services/auth_service.dart';
 import '../services/player_service.dart';
 import '../widgets/error_dialog.dart';
 import '../widgets/date_input_field.dart';
+import 'account_settings_screen.dart';
 import 'game_roster_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,6 +55,7 @@ class SavedRosterScreen extends StatefulWidget {
 
 class _SavedRosterScreenState extends State<SavedRosterScreen> {
   final _playerService = PlayerService();
+  final _authService = AuthService();
 
   // CHANGE (v1.3): roster list is now driven by a Realtime stream subscription
   // instead of a one-shot Future.
@@ -451,6 +454,32 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
     }
   }
 
+  // ── Logout ─────────────────────────────────────────────────────────────────
+
+  Future<void> _performLogout() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Log Out'),
+        content: const Text('Are you sure you want to log out?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Log Out'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    _playerService.clearCache();
+    await _authService.signOut();
+    if (mounted) Navigator.popUntil(context, (route) => route.isFirst);
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -470,6 +499,41 @@ class _SavedRosterScreenState extends State<SavedRosterScreen> {
                     TextStyle(fontSize: 12, fontWeight: FontWeight.normal)),
           ],
         ),
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (v) async {
+              if (v == 'accountSettings') {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const AccountSettingsScreen()),
+                );
+              } else if (v == 'logout') {
+                await _performLogout();
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'accountSettings',
+                child: Row(children: [
+                  Icon(Icons.manage_accounts, size: 20),
+                  SizedBox(width: 12),
+                  Text('Account Settings'),
+                ]),
+              ),
+              PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'logout',
+                child: Row(children: [
+                  Icon(Icons.logout, size: 20),
+                  SizedBox(width: 12),
+                  Text('Log Out'),
+                ]),
+              ),
+            ],
+          ),
+        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())

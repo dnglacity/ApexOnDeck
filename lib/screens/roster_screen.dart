@@ -9,6 +9,8 @@ import 'add_player_screen.dart';
 import 'manage_members_screen.dart';
 import 'saved_roster_screen.dart';
 import 'account_settings_screen.dart';
+import 'matches_screen.dart';
+import '../models/match.dart';
 
 // =============================================================================
 // roster_screen.dart  (AOD v1.7 — updated)
@@ -70,6 +72,13 @@ class _RosterScreenState extends State<RosterScreen> {
   bool _bulkDeleteMode = false;
   final Set<String> _selectedIds = {};
 
+  // ── Bottom nav tab ─────────────────────────────────────────────────────────
+  int _tabIndex = 0; // 0 = Roster, 1 = Matches
+
+  // ── Matches ────────────────────────────────────────────────────────────────
+  List<Match> _matches = [];
+  bool _matchesLoading = false;
+
   // Locally mutable team metadata — updated after Edit Team.
   late String _teamName;
   late String? _sport;
@@ -79,6 +88,206 @@ class _RosterScreenState extends State<RosterScreen> {
   bool get _isCoachOrOwner =>
       widget.currentUserRole == 'owner' || widget.currentUserRole == 'coach';
 
+  // ── Create Match ───────────────────────────────────────────────────────────
+
+  Future<void> _showCreateMatchSheet() async {
+    final opponentCtrl = TextEditingController();
+    final notesCtrl = TextEditingController();
+    DateTime selectedDate = DateTime.now();
+    bool isHome = true;
+    final formKey = GlobalKey<FormState>();
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setSheetState) {
+          return Padding(
+            padding: EdgeInsets.only(
+              left: 20,
+              right: 20,
+              top: 20,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+            ),
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // ── Handle ────────────────────────────────────────
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: Theme.of(ctx).dividerColor,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    'New Match',
+                    style: Theme.of(ctx)
+                        .textTheme
+                        .titleLarge
+                        ?.copyWith(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 20),
+
+                  // ── Opponent ──────────────────────────────────────
+                  Row(
+                    children: [
+                      Expanded(
+                        child: InputDecorator(
+                          decoration: const InputDecoration(
+                            labelText: 'My Team',
+                            border: OutlineInputBorder(),
+                          ),
+                          child: Text(
+                            _teamName,
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 10),
+                        child: Text('vs.', style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                      Expanded(
+                        child: TextFormField(
+                          controller: opponentCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Opponent *',
+                            border: OutlineInputBorder(),
+                          ),
+                          textCapitalization: TextCapitalization.words,
+                          validator: (v) =>
+                              (v == null || v.trim().isEmpty) ? 'Required' : null,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Date ──────────────────────────────────────────
+                  InkWell(
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: ctx,
+                        initialDate: selectedDate,
+                        firstDate: DateTime(2020),
+                        lastDate: DateTime(2040),
+                      );
+                      if (picked != null) {
+                        setSheetState(() => selectedDate = picked);
+                      }
+                    },
+                    child: InputDecorator(
+                      decoration: const InputDecoration(
+                        labelText: 'Date *',
+                        border: OutlineInputBorder(),
+                        suffixIcon: Icon(Icons.calendar_today, size: 18),
+                      ),
+                      child: Text(
+                        '${_kMonthNames[selectedDate.month - 1]} ${selectedDate.day}, ${selectedDate.year}',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Home / Away ────────────────────────────────────
+                  Row(
+                    children: [
+                      const Text('Location:',
+                          style: TextStyle(fontWeight: FontWeight.w500)),
+                      const SizedBox(width: 12),
+                      ChoiceChip(
+                        label: const Text('Home'),
+                        selected: isHome,
+                        onSelected: (_) => setSheetState(() => isHome = true),
+                      ),
+                      const SizedBox(width: 8),
+                      ChoiceChip(
+                        label: const Text('Away'),
+                        selected: !isHome,
+                        onSelected: (_) => setSheetState(() => isHome = false),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Notes ─────────────────────────────────────────
+                  TextFormField(
+                    controller: notesCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Notes',
+                      border: OutlineInputBorder(),
+                      alignLabelWithHint: true,
+                    ),
+                    maxLines: 3,
+                    textCapitalization: TextCapitalization.sentences,
+                  ),
+                  const SizedBox(height: 24),
+
+                  // ── Save ──────────────────────────────────────────
+                  FilledButton.icon(
+                    onPressed: () async {
+                      if (!formKey.currentState!.validate()) return;
+                      try {
+                        final id = await _playerService.createMatch(
+                          teamId: widget.teamId,
+                          myTeamName: _teamName,
+                          opponentName: opponentCtrl.text.trim(),
+                          matchDate: selectedDate,
+                          isHome: isHome,
+                          notes: notesCtrl.text.trim(),
+                        );
+                        final match = Match(
+                          id: id,
+                          teamId: widget.teamId,
+                          myTeamName: _teamName,
+                          opponentName: opponentCtrl.text.trim(),
+                          date: selectedDate,
+                          isHome: isHome,
+                          notes: notesCtrl.text.trim(),
+                        );
+                        if (ctx.mounted) Navigator.pop(ctx, match);
+                      } catch (e) {
+                        if (ctx.mounted) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            SnackBar(content: Text('$e')),
+                          );
+                        }
+                      }
+                    },
+                    icon: const Icon(Icons.check),
+                    label: const Text('Save Match'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        });
+      },
+    ).then((result) {
+      if (result is Match && mounted) {
+        setState(() => _matches.add(result));
+      }
+    });
+  }
+
+  static const _kMonthNames = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+
   @override
   void initState() {
     super.initState();
@@ -86,6 +295,7 @@ class _RosterScreenState extends State<RosterScreen> {
     _sport = widget.sport;
     _scrollController.addListener(_onScroll);
     _loadFirstPage();
+    _loadMatches();
   }
 
   @override
@@ -104,6 +314,21 @@ class _RosterScreenState extends State<RosterScreen> {
         _hasMore &&
         !_isPaginating) {
       _loadNextPage();
+    }
+  }
+
+  Future<void> _loadMatches() async {
+    if (_matchesLoading) return;
+    setState(() => _matchesLoading = true);
+    try {
+      final rows = await _playerService.getMatches(widget.teamId);
+      if (mounted) {
+        setState(() => _matches = rows.map(Match.fromMap).toList());
+      }
+    } catch (e) {
+      if (mounted) showErrorDialog(context, e);
+    } finally {
+      if (mounted) setState(() => _matchesLoading = false);
     }
   }
 
@@ -913,9 +1138,40 @@ class _RosterScreenState extends State<RosterScreen> {
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tabIndex,
+        onTap: (i) => setState(() => _tabIndex = i),
+        selectedItemColor: colorScheme.primary,
+        unselectedItemColor: colorScheme.onSurface.withValues(alpha: 0.55),
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.groups_outlined),
+            activeIcon: Icon(Icons.groups),
+            label: 'Roster',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.sports_outlined),
+            activeIcon: Icon(Icons.sports),
+            label: 'Matches',
+          ),
+        ],
+      ),
+      body: _tabIndex == 1
+          ? MatchesScreen(
+              matches: _matches,
+              onMatchUpdated: (updated) {
+                setState(() {
+                  final idx = _matches.indexWhere((m) => m.id == updated.id);
+                  if (idx != -1) _matches[idx] = updated;
+                });
+              },
+              onMatchDeleted: (matchId) {
+                setState(() => _matches.removeWhere((m) => m.id == matchId));
+              },
+            )
+          : _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : Column(
               children: [
                 // ── Attendance summary card ────────────────────────────────
                 Card(
@@ -1288,35 +1544,43 @@ class _RosterScreenState extends State<RosterScreen> {
                 ),
               ],
             ),
-      floatingActionButton: _bulkDeleteMode
-          ? (_isOwner
+      floatingActionButton: _tabIndex == 1
+          ? (_isCoachOrOwner
               ? FloatingActionButton.extended(
-                  onPressed: _confirmBulkDelete,
-                  backgroundColor: Colors.red,
-                  icon: const Icon(Icons.delete),
-                  label: Text(
-                    _selectedIds.isEmpty
-                        ? 'Delete'
-                        : 'Delete (${_selectedIds.length})',
-                  ),
+                  onPressed: () => _showCreateMatchSheet(),
+                  icon: const Icon(Icons.event),
+                  label: const Text('Create Event'),
                 )
               : null)
-          : (_isCoachOrOwner
-              ? FloatingActionButton.extended(
-                  onPressed: () async {
-                    final result = await Navigator.push<bool>(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            AddPlayerScreen(teamId: widget.teamId),
+          : (_bulkDeleteMode
+              ? (_isOwner
+                  ? FloatingActionButton.extended(
+                      onPressed: _confirmBulkDelete,
+                      backgroundColor: Colors.red,
+                      icon: const Icon(Icons.delete),
+                      label: Text(
+                        _selectedIds.isEmpty
+                            ? 'Delete'
+                            : 'Delete (${_selectedIds.length})',
                       ),
-                    );
-                    if (result == true && mounted) _loadFirstPage();
-                  },
-                  icon: const Icon(Icons.person_add),
-                  label: const Text('Add Player'),
-                )
-              : null),
+                    )
+                  : null)
+              : (_isCoachOrOwner
+                  ? FloatingActionButton.extended(
+                      onPressed: () async {
+                        final result = await Navigator.push<bool>(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                AddPlayerScreen(teamId: widget.teamId),
+                          ),
+                        );
+                        if (result == true && mounted) _loadFirstPage();
+                      },
+                      icon: const Icon(Icons.person_add),
+                      label: const Text('Add Player'),
+                    )
+                  : null)),
     );
   }
 

@@ -216,14 +216,18 @@ class PlayerService {
   /// Returns all non-null jersey numbers currently assigned on [teamId].
   /// Used by AddPlayerScreen to warn when a jersey is already taken.
   Future<Set<String>> getJerseyNumbers(String teamId) async {
-    final response = await _supabase
-        .from('players')
-        .select('jersey_number')
-        .eq('team_id', teamId)
-        .not('jersey_number', 'is', null);
-    return (response as List<dynamic>)
-        .map((r) => (r['jersey_number'] as String).toUpperCase())
-        .toSet();
+    try {
+      final response = await _supabase
+          .from('players')
+          .select('jersey_number')
+          .eq('team_id', teamId)
+          .not('jersey_number', 'is', null);
+      return (response as List<dynamic>)
+          .map((r) => (r['jersey_number'] as String).toUpperCase())
+          .toSet();
+    } catch (e) {
+      _dbError(e, 'Error fetching jersey numbers.');
+    }
   }
 
   /// Paginated player fetch — powers infinite scroll on the roster screen.
@@ -325,7 +329,7 @@ class PlayerService {
           .update({'status': status})
           .eq('team_id', teamId);
     } catch (e) {
-      throw Exception('Error bulk updating status: $e');
+      _dbError(e, 'Error bulk updating status.');
     }
   }
 
@@ -345,7 +349,7 @@ class PlayerService {
     try {
       await _supabase.rpc('delete_player', params: {'p_player_id': id});
     } catch (e) {
-      throw Exception('Failed to delete player: $e');
+      _dbError(e, 'Failed to delete player.');
     }
   }
 
@@ -433,7 +437,8 @@ class PlayerService {
       return _teamsCache!;
     } catch (e) {
       debugPrint('getTeams error: $e');
-      throw Exception('Error fetching teams: $e');
+      if (e is PostgrestException) _dbError(e, 'Error fetching teams.');
+      rethrow;
     }
   }
 
@@ -456,7 +461,7 @@ class PlayerService {
       _invalidateTeamCache();
     } catch (e) {
       debugPrint('createTeam error: $e');
-      throw Exception(e.toString().replaceAll('Exception: ', ''));
+      _dbError(e, 'Error creating team.');
     }
   }
 
@@ -475,7 +480,7 @@ class PlayerService {
       }).eq('id', teamId);
       _invalidateTeamCache();
     } catch (e) {
-      throw Exception('Error updating team: $e');
+      _dbError(e, 'Error updating team.');
     }
   }
 
@@ -487,7 +492,8 @@ class PlayerService {
       await _supabase.from('teams').delete().eq('id', teamId);
       _invalidateTeamCache();
     } catch (e) {
-      throw Exception('Error deleting team: $e');
+      if (e is PostgrestException) _dbError(e, 'Error deleting team.');
+      rethrow;
     }
   }
 
@@ -560,7 +566,7 @@ class PlayerService {
           .toList();
     } catch (e) {
       debugPrint('getTeamMembers error: $e');
-      throw Exception('Error fetching team members: $e');
+      _dbError(e, 'Error fetching team members.');
     }
   }
 
@@ -579,7 +585,7 @@ class PlayerService {
       _invalidateTeamCache();
     } catch (e) {
       debugPrint('addMemberToTeam error: $e');
-      throw Exception(e.toString().replaceAll('Exception: ', ''));
+      _dbError(e, 'Error adding team member.');
     }
   }
 
@@ -629,7 +635,7 @@ class PlayerService {
       } else if (msg.contains('No player found')) {
         throw Exception('Player not found on this team.');
       }
-      throw Exception('Error linking player: $e');
+      throw Exception(e is PostgrestException ? 'Update failed.' : 'Error linking player.');
     }
   }
 
@@ -661,7 +667,7 @@ class PlayerService {
       });
       _invalidateTeamCache();
     } catch (e) {
-      throw Exception('Error removing member: $e');
+      _dbError(e, 'Error removing member.');
     }
   }
 
@@ -678,7 +684,7 @@ class PlayerService {
       });
       _invalidateTeamCache();
     } catch (e) {
-      throw Exception('Error transferring ownership: $e');
+      _dbError(e, 'Error transferring ownership.');
     }
   }
 
@@ -703,7 +709,8 @@ class PlayerService {
           .eq('team_id', teamId)
           .eq('user_id', userId);
     } catch (e) {
-      throw Exception('Error updating member role: $e');
+      if (e is PostgrestException) _dbError(e, 'Error updating member role.');
+      rethrow;
     }
   }
 
@@ -731,7 +738,7 @@ class PlayerService {
             .readList(OfflineCacheService.gameRostersKey(teamId));
         if (cached != null) return cached;
       }
-      throw Exception('Error fetching game rosters: $e');
+      _dbError(e, 'Error fetching game rosters.');
     }
   }
 
@@ -785,7 +792,7 @@ class PlayerService {
           .single();
       return result['id'] as String;
     } catch (e) {
-      throw Exception('Error creating game roster: $e');
+      _dbError(e, 'Error creating game roster.');
     }
   }
 
@@ -799,7 +806,7 @@ class PlayerService {
         'game_date': gameDate,
       }).eq('id', rosterId);
     } catch (e) {
-      throw Exception('Error updating game roster metadata: $e');
+      _dbError(e, 'Error updating game roster metadata.');
     }
   }
 
@@ -817,7 +824,7 @@ class PlayerService {
         'starter_slots': starterSlots,
       }).eq('id', rosterId);
     } catch (e) {
-      throw Exception('Error updating game roster lineup: $e');
+      _dbError(e, 'Error updating game roster lineup.');
     }
   }
 
@@ -848,7 +855,7 @@ class PlayerService {
           .single();
       return result['id'] as String;
     } catch (e) {
-      throw Exception('Error duplicating game roster: $e');
+      _dbError(e, 'Error duplicating game roster.');
     }
   }
 
@@ -857,7 +864,7 @@ class PlayerService {
     try {
       await _supabase.from('game_rosters').delete().eq('id', rosterId);
     } catch (e) {
-      throw Exception('Error deleting game roster: $e');
+      _dbError(e, 'Error deleting game roster.');
     }
   }
 
@@ -879,7 +886,7 @@ class PlayerService {
         'expires_at': DateTime.parse(row['expires_at'] as String).toLocal(),
       };
     } catch (e) {
-      throw Exception('Error fetching team invite: $e');
+      _dbError(e, 'Error fetching team invite.');
     }
   }
 
@@ -888,7 +895,7 @@ class PlayerService {
     try {
       await _supabase.rpc('revoke_team_invite', params: {'p_team_id': teamId});
     } catch (e) {
-      throw Exception('Error revoking team invite: $e');
+      _dbError(e, 'Error revoking team invite.');
     }
   }
 
@@ -909,6 +916,85 @@ class PlayerService {
       // Surface the readable Postgres RAISE EXCEPTION message directly.
       final match = RegExp(r'message: (.+?)(?:,|\})').firstMatch(msg);
       throw Exception(match?.group(1) ?? 'Error redeeming invite code.');
+    }
+  }
+
+  // ===========================================================================
+  // MATCHES
+  // ===========================================================================
+
+  /// Returns all matches for [teamId], ordered by match_date ascending.
+  Future<List<Map<String, dynamic>>> getMatches(String teamId) async {
+    try {
+      final response = await _supabase
+          .from('matches')
+          .select('id, team_id, my_team_name, opponent_name, match_date, is_home, notes, created_at')
+          .eq('team_id', teamId)
+          .order('match_date', ascending: true);
+      return (response as List<dynamic>).cast<Map<String, dynamic>>();
+    } catch (e) {
+      _dbError(e, 'Error fetching matches.');
+    }
+  }
+
+  /// Inserts a new match row and returns the generated UUID.
+  Future<String> createMatch({
+    required String teamId,
+    required String myTeamName,
+    required String opponentName,
+    required DateTime matchDate,
+    required bool isHome,
+    String notes = '',
+  }) async {
+    try {
+      final result = await _supabase
+          .from('matches')
+          .insert({
+            'team_id':       teamId,
+            'my_team_name':  myTeamName,
+            'opponent_name': opponentName,
+            'match_date':    matchDate.toUtc().toIso8601String(),
+            'is_home':       isHome,
+            'notes':         notes,
+          })
+          .select('id')
+          .single();
+      return result['id'] as String;
+    } catch (e) {
+      _dbError(e, 'Error creating match.');
+    }
+  }
+
+  /// Updates mutable fields on an existing match row.
+  Future<void> updateMatch({
+    required String matchId,
+    String? myTeamName,
+    String? opponentName,
+    DateTime? matchDate,
+    bool? isHome,
+    String? notes,
+  }) async {
+    try {
+      final updates = <String, dynamic>{
+        if (myTeamName != null) 'my_team_name': myTeamName,
+        if (opponentName != null) 'opponent_name': opponentName,
+        if (matchDate != null) 'match_date': matchDate.toUtc().toIso8601String(),
+        if (isHome != null) 'is_home': isHome,
+        if (notes != null) 'notes': notes,
+      };
+      if (updates.isEmpty) return;
+      await _supabase.from('matches').update(updates).eq('id', matchId);
+    } catch (e) {
+      _dbError(e, 'Error updating match.');
+    }
+  }
+
+  /// Deletes a match by [matchId].
+  Future<void> deleteMatch(String matchId) async {
+    try {
+      await _supabase.from('matches').delete().eq('id', matchId);
+    } catch (e) {
+      _dbError(e, 'Error deleting match.');
     }
   }
 }

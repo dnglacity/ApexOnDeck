@@ -1,3 +1,52 @@
+v1.12 03.01.2026 Fix matches not persisting across sessions
+- Fixed: screens/roster_screen.dart — _showCreateMatchSheet now calls _playerService.createMatch() to persist to Supabase and uses the returned UUID as the match ID (was using a fake local timestamp ID)
+- Added: screens/roster_screen.dart — _loadMatches() method that fetches existing matches from Supabase on initState so the Matches tab is populated when returning to the screen
+
+v1.12 03.01.2026 Add match view screen with match settings menu
+- Added: screens/match_view_screen.dart — full-screen view for a single match showing teams, date, location, and notes; top-right PopupMenuButton with Match Settings option opening a bottom sheet with Edit Match and Delete Match actions
+- Changed: screens/matches_screen.dart — match cards are now tappable (InkWell); tapping navigates to MatchViewScreen; added clipBehavior to Card for ripple clipping
+
+v1.12 03.01.2026 Persist matches to Supabase
+- Added: Supabase_script.md — SQL to create public.matches table with RLS (team members can SELECT; coaches/owners/managers can INSERT/UPDATE/DELETE)
+- Changed: models/match.dart — added teamId, fromMap, toMap, copyWith; now maps to DB columns (team_id, my_team_name, opponent_name, match_date, is_home, notes)
+- Changed: services/player_service.dart — added getMatches, createMatch, updateMatch, deleteMatch CRUD methods for public.matches
+
+v1.12 03.01.2026 Add Create Event form and match list to Matches tab
+- Added: models/match.dart — in-memory Match model (id, myTeamName, opponentName, date, isHome, notes)
+- Changed: matches_screen.dart — now accepts List<Match>; shows empty-state placeholder or sorted card list with date badge, title, Home/Away label, and notes
+- Changed: roster_screen.dart — _matches state list; _showCreateMatchSheet() modal bottom sheet with opponent field, date picker, Home/Away ChoiceChip toggle, notes field, and Save button; MatchesScreen receives _matches
+
+v1.12 03.01.2026 Add Roster/Matches bottom nav and Create Event FAB to RosterScreen
+- Added: matches_screen.dart — placeholder Matches tab with empty-state UI
+- Changed: roster_screen.dart — added BottomNavigationBar (Roster / Matches tabs); FAB switches to "Create Event" on Matches tab; existing Add Player / bulk-delete FABs preserved on Roster tab
+
+v1.12 03.01.2026 Persist three-dot menu with logout throughout entire app flow
+- Changed: calendar_screen.dart — added AuthService + PlayerService, logout handler, and AppBar PopupMenuButton with Account Settings and Log Out
+- Changed: game_roster_screen.dart — added AuthService, logout handler, and merged logout + Account Settings into existing settings PopupMenuButton (icon changed to more_vert)
+- Changed: saved_roster_screen.dart — added AuthService, logout handler, and AppBar PopupMenuButton with Account Settings and Log Out
+- Changed: manage_members_screen.dart — added AuthService, logout handler, and AppBar PopupMenuButton with Account Settings and Log Out
+- Changed: add_player_screen.dart — added AuthService, logout handler, and AppBar PopupMenuButton with Account Settings and Log Out
+- Changed: player_self_view_screen.dart — added Account Settings item and more_vert icon to existing logout menu; added account_settings_screen import
+
+v1.12 03.01.2026 Add bottom navigation bar with Teams and Schedule tabs
+- Added: main_shell.dart — MainShell widget wrapping authenticated screens in a BottomNavigationBar with IndexedStack (preserves state across tab switches)
+- Added: calendar_screen.dart — Schedule screen with a navigable month-view calendar grid, day selection, and events placeholder list
+- Changed: auth_wrapper.dart — routes authenticated sessions to MainShell instead of TeamSelectionScreen directly; TeamSelectionScreen is now tab 0
+
+v1.12 03.01.2026 Rate-limit redeem_team_invite RPC to thwart invite-code scraping
+- Added: invite_attempt_log table (auth_uid, attempted_at) with RLS enabled and no direct-access policies
+- Added: index idx_invite_attempt_log_uid_ts on (auth_uid, attempted_at DESC) for efficient windowed counts
+- Changed: redeem_team_invite RPC — every call (including failures) is logged before redemption logic runs; callers exceeding 10 attempts in a 15-minute sliding window receive a rate-limit exception
+- Added: optional pg_cron snippet in supabase_script.md to purge attempt rows older than 24 hours
+- Updated: supabase_schema.json — new invite_attempt_log table entry and updated redeem_team_invite definition
+
+v1.12 03.01.2026 Sanitize PostgrestException errors to prevent schema leakage
+- Fixed: player_service.dart — 18 catch blocks that used throw Exception('...: $e') now route through _dbError() or an inline PostgrestException check, ensuring table names, column names, and constraint details never reach the UI
+- Fixed: auth_service.dart updateProfile() — bare DB call now wrapped in on PostgrestException catch that throws Exception('Update failed.')
+- Fixed: player_service.dart getJerseyNumbers() — added missing try/catch with _dbError()
+- Changed: methods with intentional domain exceptions (getTeams, deleteTeam, updateMemberRole) use if (e is PostgrestException) _dbError(...); rethrow pattern to preserve user-readable guards while still sanitizing DB errors
+- Changed: linkPlayerToAccount fallback now throws Exception(e is PostgrestException ? 'Update failed.' : 'Error linking player.') to preserve specific RPC messages while blocking schema leakage
+
 v1.12 02.28.2026 Add COPPA age-gate checkbox to sign-up form
 - Added: _ageConfirmed bool state to LoginScreen, reset on mode toggle
 - Added: "I confirm I am 13 or older" checkbox row displayed in sign-up mode only

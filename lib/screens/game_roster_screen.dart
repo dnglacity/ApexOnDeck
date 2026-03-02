@@ -8,9 +8,11 @@ import 'package:flutter/services.dart';
 // the analyzer to report inconsistencies and can break on rename/refactor.
 // Standardised to relative import to match the rest of the codebase.
 import '../models/player.dart';
+import '../services/auth_service.dart';
 import '../services/player_service.dart';
 import '../widgets/error_dialog.dart';
 import '../widgets/date_input_field.dart';
+import 'account_settings_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // game_roster_screen.dart  (AOD v1.4)
@@ -65,6 +67,7 @@ class GameRosterScreen extends StatefulWidget {
 class _GameRosterScreenState extends State<GameRosterScreen>
     with SingleTickerProviderStateMixin {
   final PlayerService _playerService = PlayerService();
+  final AuthService _authService = AuthService();
 
   List<Player> _allPlayers = [];
   List<Player> _starters = [];
@@ -554,6 +557,32 @@ class _GameRosterScreenState extends State<GameRosterScreen>
     }
   }
 
+  // ── Logout ─────────────────────────────────────────────────────────────────
+
+  Future<void> _performLogout() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Log Out'),
+        content: const Text('Are you sure you want to log out?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Log Out'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    _playerService.clearCache();
+    await _authService.signOut();
+    if (mounted) Navigator.popUntil(context, (route) => route.isFirst);
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -584,13 +613,21 @@ class _GameRosterScreenState extends State<GameRosterScreen>
         ),
         actions: [
           PopupMenuButton<String>(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Roster settings',
+            icon: const Icon(Icons.more_vert),
+            tooltip: 'More options',
             onSelected: (v) async {
               if (v == 'slots') {
                 await _showSlotDialog();
               } else if (v == 'date') {
                 await _showDateDialog();
+              } else if (v == 'accountSettings') {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const AccountSettingsScreen()),
+                );
+              } else if (v == 'logout') {
+                await _performLogout();
               }
             },
             itemBuilder: (_) => const [
@@ -608,6 +645,24 @@ class _GameRosterScreenState extends State<GameRosterScreen>
                   Icon(Icons.calendar_today, size: 20),
                   SizedBox(width: 12),
                   Text('Change Date'),
+                ]),
+              ),
+              PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'accountSettings',
+                child: Row(children: [
+                  Icon(Icons.manage_accounts, size: 20),
+                  SizedBox(width: 12),
+                  Text('Account Settings'),
+                ]),
+              ),
+              PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'logout',
+                child: Row(children: [
+                  Icon(Icons.logout, size: 20),
+                  SizedBox(width: 12),
+                  Text('Log Out'),
                 ]),
               ),
             ],

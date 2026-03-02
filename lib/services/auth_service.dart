@@ -172,7 +172,11 @@ class AuthService {
 
     if (updates.isEmpty) return;
 
-    await _supabase.from('users').update(updates).eq('user_id', authUser.id);
+    try {
+      await _supabase.from('users').update(updates).eq('user_id', authUser.id);
+    } on PostgrestException {
+      throw Exception('Update failed.');
+    }
   }
 
   // ── Change Email ──────────────────────────────────────────────────────────

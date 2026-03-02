@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'login_screen.dart';
-import 'team_selection_screen.dart';
+import 'main_shell.dart';
 import 'reset_password_screen.dart'; // NEW — see below
 
 // =============================================================================
@@ -50,8 +50,8 @@ class AuthWrapper extends StatelessWidget {
         }
 
         if (session != null) {
-          // Normal authenticated session → show team selection.
-          return const TeamSelectionScreen();
+          // Normal authenticated session → show main shell (teams + schedule).
+          return const MainShell();
         } else {
           // Not authenticated → show login/signup.
           return const LoginScreen();
