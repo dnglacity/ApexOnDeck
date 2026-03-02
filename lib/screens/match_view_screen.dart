@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../models/match.dart';
 import '../services/player_service.dart';
 import 'game_roster_screen.dart';
+import 'match_play_screen.dart';
 
 // =============================================================================
 // match_view_screen.dart  (AOD v1.13)
@@ -54,6 +55,7 @@ class MatchViewScreen extends StatefulWidget {
 
 class _MatchViewScreenState extends State<MatchViewScreen> {
   late Match _match;
+  String? _selectedRosterId;
   String? _selectedRosterName;
 
   static const _monthNames = [
@@ -132,22 +134,49 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            // ── Status chip ─────────────────────────────────────────────────────
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Chip(
-                label: Text(isPast ? 'Past' : 'Upcoming'),
-                backgroundColor: isPast
-                    ? cs.surfaceContainerHighest
-                    : cs.primaryContainer,
-                labelStyle: TextStyle(
-                  color: isPast ? cs.onSurfaceVariant : cs.onPrimaryContainer,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
+            // ── Date / Status / Location ─────────────────────────────────────────
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Icon(Icons.calendar_today_outlined,
+                    size: 16, color: cs.onSurface.withValues(alpha: 0.6)),
+                const SizedBox(width: 6),
+                Text(
+                  '${_shortMonthNames[_match.date.month - 1]} ${_match.date.day}, ${_match.date.year}',
+                  style: tt.bodyMedium?.copyWith(
+                    color: cs.onSurface.withValues(alpha: 0.8),
+                  ),
                 ),
-                side: BorderSide.none,
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-              ),
+                const SizedBox(width: 8),
+                Chip(
+                  label: Text(isPast ? 'Past' : 'Upcoming'),
+                  backgroundColor: isPast
+                      ? cs.surfaceContainerHighest
+                      : cs.primaryContainer,
+                  labelStyle: TextStyle(
+                    color: isPast ? cs.onSurfaceVariant : cs.onPrimaryContainer,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                  ),
+                  side: BorderSide.none,
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                ),
+                const Spacer(),
+                Icon(
+                  _match.isHome ? Icons.home_outlined : Icons.directions_bus_outlined,
+                  size: 16,
+                  color: cs.onSurface.withValues(alpha: 0.6),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  _match.isHome ? 'Home' : 'Away',
+                  style: tt.bodyMedium?.copyWith(
+                    color: cs.onSurface.withValues(alpha: 0.8),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
 
@@ -189,26 +218,6 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
             const Divider(),
             const SizedBox(height: 16),
 
-            // ── Date & time ──────────────────────────────────────────────────────
-            _InfoRow(
-              icon: Icons.calendar_today_outlined,
-              label: 'Date',
-              value:
-                  '${_dayNames[_match.date.weekday]}, ${_monthNames[_match.date.month - 1]} ${_match.date.day}, ${_match.date.year}',
-              cs: cs,
-              tt: tt,
-            ),
-            const SizedBox(height: 14),
-
-            // ── Location ─────────────────────────────────────────────────────────
-            _InfoRow(
-              icon: _match.isHome ? Icons.home_outlined : Icons.directions_bus_outlined,
-              label: 'Location',
-              value: _match.isHome ? 'Home' : 'Away',
-              cs: cs,
-              tt: tt,
-            ),
-
             // ── Notes ────────────────────────────────────────────────────────────
             if (_match.notes.isNotEmpty) ...[
               const SizedBox(height: 24),
@@ -232,13 +241,51 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
             ],
           ],
         ),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: () {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Stage Match'),
+                content: const Text(
+                  'The match will be staged and rosters will be exchanged.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => MatchPlayScreen(
+                            match: widget.match,
+                            isCoach: widget.isCoach,
+                          ),
+                        ),
+                      );
+                    },
+                    child: const Text('Stage'),
+                  ),
+                ],
+              ),
+            );
+          },
+          icon: const Icon(Icons.rocket_launch),
+          label: const Text('Stage Match'),
+          backgroundColor: const Color(0xFFF4C430),
+          foregroundColor: const Color(0xFF1A3A6B),
+        ),
+        floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 
   // ── Select Roster ────────────────────────────────────────────────────────
 
   Future<void> _showSelectRosterSheet(BuildContext context) async {
-    final name = await showModalBottomSheet<String>(
+    final result = await showModalBottomSheet<({String id, String name})>(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
@@ -247,9 +294,15 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
       builder: (_) => _SelectRosterSheet(
         teamId: _match.teamId,
         teamName: _match.myTeamName,
+        initialSelectedId: _selectedRosterId,
       ),
     );
-    if (mounted) setState(() => _selectedRosterName = name ?? _selectedRosterName);
+    if (mounted && result != null) {
+      setState(() {
+        _selectedRosterId = result.id;
+        _selectedRosterName = result.name;
+      });
+    }
   }
 
   // ── Match Invite ─────────────────────────────────────────────────────────
@@ -790,10 +843,12 @@ class _InfoRow extends StatelessWidget {
 class _SelectRosterSheet extends StatefulWidget {
   final String teamId;
   final String teamName;
+  final String? initialSelectedId;
 
   const _SelectRosterSheet({
     required this.teamId,
     required this.teamName,
+    this.initialSelectedId,
   });
 
   @override
@@ -805,13 +860,14 @@ class _SelectRosterSheetState extends State<_SelectRosterSheet> {
 
   List<_RosterEntry> _rosters = [];
   bool _loading = true;
-  String? _selectedId;
+  late String? _selectedId;
 
   StreamSubscription<List<Map<String, dynamic>>>? _sub;
 
   @override
   void initState() {
     super.initState();
+    _selectedId = widget.initialSelectedId;
     _sub = _service.getGameRosterStream(widget.teamId).listen(
       (rows) {
         if (mounted) {
@@ -1094,12 +1150,13 @@ class _SelectRosterSheetState extends State<_SelectRosterSheet> {
                   alignment: Alignment.centerRight,
                   child: FilledButton(
                     onPressed: () {
-                      final name = _selectedId == null
-                          ? null
-                          : _rosters
-                              .firstWhere((r) => r.id == _selectedId)
-                              .title;
-                      Navigator.of(context).pop(name);
+                      if (_selectedId == null) {
+                        Navigator.of(context).pop(null);
+                        return;
+                      }
+                      final r = _rosters.firstWhere((r) => r.id == _selectedId);
+                      Navigator.of(context)
+                          .pop<({String id, String name})>((id: r.id, name: r.title));
                     },
                     child: const Text('Confirm'),
                   ),

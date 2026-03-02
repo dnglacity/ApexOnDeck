@@ -430,9 +430,35 @@ class PlayerService {
               'is_coach':   role == 'coach' || role == 'owner',
               'is_player':  role == 'player',
               'player_id':  item['player_id'],
+              'owner_name': null, // populated below
             };
           })
           .toList();
+
+      // Fetch owner names for all teams in one round-trip.
+      final teamIds = _teamsCache!.map((t) => t['id'] as String).toList();
+      if (teamIds.isNotEmpty) {
+        final ownersResponse = await _supabase
+            .from('team_members')
+            .select('team_id, users(first_name, last_name)')
+            .inFilter('team_id', teamIds)
+            .eq('role', 'owner');
+
+        final ownerMap = <String, String>{};
+        for (final row in (ownersResponse as List<dynamic>)) {
+          final teamId = row['team_id'] as String;
+          final user = row['users'] as Map<String, dynamic>?;
+          if (user != null) {
+            final first = (user['first_name'] as String? ?? '').trim();
+            final last  = (user['last_name']  as String? ?? '').trim();
+            ownerMap[teamId] = [first, last].where((s) => s.isNotEmpty).join(' ');
+          }
+        }
+
+        _teamsCache = _teamsCache!.map((t) {
+          return {...t, 'owner_name': ownerMap[t['id'] as String]};
+        }).toList();
+      }
 
       return _teamsCache!;
     } catch (e) {

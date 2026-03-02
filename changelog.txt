@@ -1,3 +1,10 @@
+v1.14 03.01.2026 Persist selected game roster in match view
+- Fixed: screens/match_view_screen.dart — reopening the Select Roster sheet now pre-selects the previously confirmed roster; added _selectedRosterId field to _MatchViewScreenState and initialSelectedId parameter to _SelectRosterSheet; Confirm now pops a ({String id, String name}) record so both id and name are stored; parent state only updates on explicit confirmation
+
+v1.14 03.01.2026 Add stage match confirmation and match play screen
+- Added: screens/match_play_screen.dart — new screen opened when a match is staged; displays match title and location label as a live-match placeholder scaffold
+- Changed: screens/match_view_screen.dart — Stage Match FAB now shows a confirmation dialog ("The match will be staged and rosters will be exchanged.") with Cancel and Stage buttons; pressing Stage navigates to MatchPlayScreen
+
 v1.14 03.01.2026 Add Select Roster picker to match view
 - Added: screens/match_view_screen.dart — clipboard icon button (coaches only) in AppBar left of menu opens a Select Roster bottom sheet; sheet streams the team's game rosters in real time, allows single selection with a green checkmark, includes a + button to create a new roster inline (opens GameRosterScreen immediately), and returns the selected roster title on Confirm
 - Added: screens/match_view_screen.dart — _RosterEntry local model and _SelectRosterSheet StatefulWidget to support the picker

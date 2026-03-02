@@ -685,8 +685,20 @@ class _TeamSelectionScreenState extends State<TeamSelectionScreen> {
                                   _roleBadge(role, colorScheme),
                                 ],
                               ),
-                              subtitle: Text(
-                                  team['sport'] as String? ?? 'General'),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(team['sport'] as String? ?? 'General'),
+                                  if ((team['owner_name'] as String?)?.isNotEmpty == true)
+                                    Text(
+                                      team['owner_name'] as String,
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey[600]),
+                                    ),
+                                ],
+                              ),
+                              isThreeLine: (team['owner_name'] as String?)?.isNotEmpty == true,
                               // Non-player roles get a popup menu for edit/delete.
                               trailing: isPlayer
                                   ? null
