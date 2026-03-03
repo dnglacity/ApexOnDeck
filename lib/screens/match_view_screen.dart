@@ -18,7 +18,7 @@ import 'match_format_screen.dart';
 // A clipboard icon (coaches only) opens the Select Roster picker.
 // =============================================================================
 
-enum _MatchMenuItem { settings, createInvite, removeOpponent }
+enum _MatchMenuItem { settings, createInvite, removeOpponent, leaveMatch }
 
 /// Lightweight roster entry used by the Select Roster picker.
 class _RosterEntry {
@@ -65,12 +65,15 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
   String? _selectedRosterId;
   String? _selectedRosterName;
   bool _isStaged = false;
+  // True once the guest team (Team B) has submitted their roster.
+  // Stored on Team A's row as guest_roster_submitted.
+  bool _guestRosterSubmitted = false;
 
   // True when the current user belongs to the team that created the match.
-  // Falls back to true when currentTeamId is unknown (e.g. legacy callers).
-  bool get _isMatchOwner =>
-      widget.currentTeamId == null ||
-      widget.currentTeamId == _match.teamId;
+  // isGuestMatch is set on the row created for the opposing team (Team B) when
+  // they accept an invite, so it reliably identifies non-owners regardless of
+  // team IDs (which both point to their own team, not the match creator).
+  bool get _isMatchOwner => !_match.isGuestMatch;
 
   // Roster preview data loaded when a roster is selected.
   List<Map<String, dynamic>> _rosterStarters = [];
@@ -80,6 +83,9 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
   Map<String, String> _formatSlots = {}; // "$sIdx-$pIdx" → playerId
 
   RealtimeChannel? _matchChannel;
+  // Broadcast channel for cross-team real-time staging/submission signals.
+  // Keyed by Team A's match ID so both sides share the same channel.
+  RealtimeChannel? _broadcastChannel;
 
   // Actual team name of the opponent, populated after invite is accepted.
   String? _linkedTeamName;
@@ -89,6 +95,7 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
     super.initState();
     _match = widget.match;
     _isStaged = widget.match.isStaged;
+    _guestRosterSubmitted = widget.match.guestRosterSubmitted;
     _selectedRosterId = widget.match.selectedRosterId;
     _selectedRosterName = widget.match.selectedRosterName;
     if (_selectedRosterId != null) _loadRosterPreview(_selectedRosterId!);
@@ -103,7 +110,7 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
     try {
       final row = await Supabase.instance.client
           .from('matches')
-          .select('is_staged, linked_match_id')
+          .select('is_staged, linked_match_id, guest_roster_submitted')
           .eq('id', _match.id)
           .single();
       if (!mounted) return;
@@ -111,7 +118,10 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
       setState(() {
         _match = _match.copyWith(linkedMatchId: linkedId);
         // Only update is_staged from own row if we are the match owner.
-        if (_isMatchOwner) _isStaged = row['is_staged'] == true;
+        if (_isMatchOwner) {
+          _isStaged = row['is_staged'] == true;
+          _guestRosterSubmitted = row['guest_roster_submitted'] == true;
+        }
       });
       // For the match owner, fetch the opponent's actual team name once linked.
       if (_isMatchOwner && linkedId != null) {
@@ -153,15 +163,13 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
   }
 
   void _subscribeToMatchStaged() {
-    // For match owners subscribe to their own row.
-    // For opponents (Team B), subscribe to the linked row (Team A's row) so
-    // that staging by Team A is reflected in real time.
-    final watchId = (!_isMatchOwner && _match.linkedMatchId != null)
-        ? _match.linkedMatchId!
-        : _match.id;
-
+    // Subscribe to own row via postgres changes.
+    // Team A watches its own row for guest_roster_submitted and linked_match_id.
+    // Team B's postgres-changes subscription to Team A's row may be blocked by
+    // RLS, so cross-team staging signals are handled via the broadcast channel
+    // below instead.
     _matchChannel = Supabase.instance.client
-        .channel('match_staged_$watchId')
+        .channel('match_staged_${_match.id}')
         .onPostgresChanges(
           event: PostgresChangeEvent.update,
           schema: 'public',
@@ -169,15 +177,15 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
           filter: PostgresChangeFilter(
             type: PostgresChangeFilterType.eq,
             column: 'id',
-            value: watchId,
+            value: _match.id,
           ),
           callback: (payload) {
             final newRow = payload.newRecord;
             if (mounted) {
               setState(() {
-                _isStaged = newRow['is_staged'] == true;
-                // Match owner: capture linked_match_id updates (e.g. Team B joins).
                 if (_isMatchOwner) {
+                  _isStaged = newRow['is_staged'] == true;
+                  _guestRosterSubmitted = newRow['guest_roster_submitted'] == true;
                   final linkedId = newRow['linked_match_id'] as String?;
                   _match = _match.copyWith(linkedMatchId: linkedId);
                   // Fetch opponent name when they first join.
@@ -192,11 +200,41 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
           },
         )
         .subscribe();
+
+    // Broadcast channel — bypasses RLS so Team B receives Team A's staging
+    // events and Team A receives Team B's submission events in real time.
+    // Both teams use Team A's match ID as the canonical channel name.
+    final canonicalId = _isMatchOwner ? _match.id : _match.linkedMatchId;
+    if (canonicalId == null) return;
+
+    _broadcastChannel?.unsubscribe();
+    _broadcastChannel = Supabase.instance.client
+        .channel('match-events-$canonicalId')
+        .onBroadcast(
+          event: 'staged_update',
+          callback: (payload) {
+            // Team B: Team A just staged or unstaged.
+            if (mounted && !_isMatchOwner) {
+              setState(() => _isStaged = payload['is_staged'] == true);
+            }
+          },
+        )
+        .onBroadcast(
+          event: 'guest_submitted',
+          callback: (payload) {
+            // Team A: Team B just submitted their roster.
+            if (mounted && _isMatchOwner) {
+              setState(() => _guestRosterSubmitted = true);
+            }
+          },
+        )
+        .subscribe();
   }
 
   @override
   void dispose() {
     _matchChannel?.unsubscribe();
+    _broadcastChannel?.unsubscribe();
     super.dispose();
   }
 
@@ -285,11 +323,32 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
             onPressed: () => Navigator.of(context).pop(_match),
           ),
           actions: [
-            if (widget.isCoach && !_match.isGuestMatch)
+            if (widget.isCoach)
               IconButton(
                 icon: const Icon(Icons.assignment_outlined),
                 tooltip: 'Select Roster',
                 onPressed: () => _showSelectRosterSheet(context),
+              ),
+            if (_match.isGuestMatch)
+              PopupMenuButton<_MatchMenuItem>(
+                onSelected: (item) {
+                  if (item == _MatchMenuItem.leaveMatch) {
+                    _confirmLeaveMatch(context);
+                  }
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: _MatchMenuItem.leaveMatch,
+                    child: Row(
+                      children: [
+                        Icon(Icons.exit_to_app, color: Colors.red),
+                        SizedBox(width: 12),
+                        Text('Leave Match',
+                            style: TextStyle(color: Colors.red)),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             if (!_match.isGuestMatch)
               PopupMenuButton<_MatchMenuItem>(
@@ -397,8 +456,8 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                     label: 'My Team',
                     name: _match.myTeamName,
                     rosterLabel: _selectedRosterName,
-                    // Checkmark shows on the "My Team" block only for the match owner.
-                    showCheckmark: _isStaged && _isMatchOwner,
+                    // Checkmark: match owner when staged; guest when they submitted roster.
+                    showCheckmark: _isMatchOwner ? _isStaged : _guestRosterSubmitted,
                     cs: cs,
                     tt: tt,
                   ),
@@ -425,9 +484,9 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                                 ? null // signals "awaiting"
                                 : _match.opponentName))
                         : _match.opponentName,
-                    // When the viewer is NOT the match owner, the opponent IS
-                    // Team A (the match creator). Show the checkmark when staged.
-                    showCheckmark: _isStaged && !_isMatchOwner,
+                    // Match owner: checkmark when guest submitted roster.
+                    // Guest team: checkmark when Team A has staged.
+                    showCheckmark: _isMatchOwner ? _guestRosterSubmitted : _isStaged,
                     checkmarkOnRight: true,
                     cs: cs,
                     tt: tt,
@@ -504,7 +563,13 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                         onPressed: () async {
                           Navigator.of(context).pop();
                           await PlayerService().unstageMatch(_match.id);
-                          if (mounted) setState(() => _isStaged = false);
+                          if (mounted) {
+                            setState(() => _isStaged = false);
+                            _broadcastChannel?.sendBroadcastMessage(
+                              event: 'staged_update',
+                              payload: {'is_staged': false},
+                            );
+                          }
                         },
                         child: const Text('Undo'),
                       ),
@@ -530,7 +595,13 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                         onPressed: () async {
                           Navigator.of(context).pop();
                           await PlayerService().stageMatch(_match.id);
-                          if (mounted) setState(() => _isStaged = true);
+                          if (mounted) {
+                            setState(() => _isStaged = true);
+                            _broadcastChannel?.sendBroadcastMessage(
+                              event: 'staged_update',
+                              payload: {'is_staged': true},
+                            );
+                          }
                         },
                         child: const Text('Stage'),
                       ),
@@ -563,9 +634,16 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                 child: const Text('Cancel'),
               ),
               TextButton(
-                onPressed: () {
+                onPressed: () async {
                   Navigator.of(context).pop();
-                  // TODO: implement roster submission for opposing team
+                  await PlayerService().submitGuestRoster(_match.id);
+                  if (mounted) {
+                    setState(() => _guestRosterSubmitted = true);
+                    _broadcastChannel?.sendBroadcastMessage(
+                      event: 'guest_submitted',
+                      payload: {},
+                    );
+                  }
                 },
                 child: const Text('Submit'),
               ),
@@ -693,6 +771,45 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
         messenger.showSnackBar(
           SnackBar(content: Text('$opponentName has been removed.')),
         );
+      } catch (e) {
+        if (!mounted) return;
+        messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    });
+  }
+
+  // ── Leave Match (guest team) ──────────────────────────────────────────────
+
+  void _confirmLeaveMatch(BuildContext context) {
+    final messenger = ScaffoldMessenger.of(context);
+
+    showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Leave Match?'),
+        content: const Text(
+          'This will remove this match from your schedule. '
+          'The opposing team will be notified and you will need a new invite to rejoin.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    ).then((confirmed) async {
+      if (confirmed != true || !mounted) return;
+      try {
+        await PlayerService().leaveMatch(_match.id);
+        if (!mounted) return;
+        // null signals the matches list to remove this entry.
+        Navigator.of(context).pop(null);
       } catch (e) {
         if (!mounted) return;
         messenger.showSnackBar(SnackBar(content: Text('Error: $e')));

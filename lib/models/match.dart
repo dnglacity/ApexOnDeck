@@ -26,6 +26,9 @@ class Match {
   // isGuestMatch is true for match rows created when a team accepts a match
   // invite (Team B). Guest teams cannot modify match settings or create invites.
   final bool isGuestMatch;
+  // guestRosterSubmitted is stored on Team A's row and set to true via the
+  // submit_guest_roster RPC when Team B submits their roster.
+  final bool guestRosterSubmitted;
 
   const Match({
     required this.id,
@@ -41,6 +44,7 @@ class Match {
     this.isStaged = false,
     this.linkedMatchId,
     this.isGuestMatch = false,
+    this.guestRosterSubmitted = false,
   });
 
   String get title => '$myTeamName vs. $opponentName';
@@ -61,6 +65,7 @@ class Match {
         isStaged: m['is_staged'] as bool? ?? false,
         linkedMatchId: m['linked_match_id'] as String?,
         isGuestMatch: m['is_guest_match'] as bool? ?? false,
+        guestRosterSubmitted: m['guest_roster_submitted'] as bool? ?? false,
       );
 
   Map<String, dynamic> toMap() => {
@@ -86,6 +91,7 @@ class Match {
     bool? isStaged,
     Object? linkedMatchId = _sentinel,
     bool? isGuestMatch,
+    bool? guestRosterSubmitted,
   }) =>
       Match(
         id: id ?? this.id,
@@ -107,6 +113,7 @@ class Match {
             ? this.linkedMatchId
             : linkedMatchId as String?,
         isGuestMatch: isGuestMatch ?? this.isGuestMatch,
+        guestRosterSubmitted: guestRosterSubmitted ?? this.guestRosterSubmitted,
       );
 }
 

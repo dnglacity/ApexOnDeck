@@ -960,7 +960,7 @@ class PlayerService {
     try {
       final response = await _supabase
           .from('matches')
-          .select('id, team_id, my_team_name, opponent_name, match_date, is_home, notes, created_at, selected_roster_id, is_staged, linked_match_id, is_guest_match')
+          .select('id, team_id, my_team_name, opponent_name, match_date, is_home, notes, created_at, selected_roster_id, is_staged, linked_match_id, is_guest_match, guest_roster_submitted')
           .eq('team_id', teamId)
           .order('match_date', ascending: true);
       return (response as List<dynamic>).cast<Map<String, dynamic>>();
@@ -1052,6 +1052,27 @@ class PlayerService {
       await _supabase.rpc('unstage_match', params: {'p_match_id': matchId});
     } catch (e) {
       _dbError(e, 'Error unstaging match.');
+    }
+  }
+
+  /// Submits the guest team's roster: sets guest_roster_submitted = true on the
+  /// host's (Team A's) match row via a SECURITY DEFINER RPC.
+  Future<void> submitGuestRoster(String matchId) async {
+    try {
+      await _supabase.rpc('submit_guest_roster', params: {'p_match_id': matchId});
+    } catch (e) {
+      _dbError(e, 'Error submitting guest roster.');
+    }
+  }
+
+  /// Leaves a guest match: deletes the caller's mirror match row and clears
+  /// linked_match_id / is_staged on the host's row. Only the guest team may call this.
+  Future<void> leaveMatch(String matchId) async {
+    try {
+      await _supabase
+          .rpc('leave_match', params: {'p_match_id': matchId});
+    } catch (e) {
+      _dbError(e, 'Error leaving match.');
     }
   }
 

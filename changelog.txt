@@ -1,3 +1,41 @@
+v1.22 03.03.2026 MatchView: live checkmark updates via broadcast channel
+
+- Added: Supabase Realtime broadcast channel (match-events-{TeamA_match_id}) for cross-team real-time signaling, bypassing RLS restrictions on postgres-changes
+- Added: _broadcastChannel field; subscribed in _subscribeToMatchStaged alongside existing postgres-changes subscription
+- Changed: Stage and Unstage actions now send staged_update broadcast so Team B sees Team A's checkmark update instantly without refresh
+- Changed: Submit Roster action now sends guest_submitted broadcast so Team A sees Team B's checkmark update instantly without refresh
+- Fixed: Team B was not receiving live is_staged updates from Team A because RLS blocked postgres-changes on Team A's row; broadcast channel resolves this
+- Changed: dispose() now unsubscribes both _matchChannel and _broadcastChannel
+
+[v1.22] 03.02.2026 1907 MatchView: green checkmark on guest team name after roster submission
+
+- Added: guest_roster_submitted boolean column to matches table (stored on Team A's row)
+- Added: submit_guest_roster SECURITY DEFINER RPC — validates caller is a guest coach/owner, sets guest_roster_submitted = true on the linked host row
+- Added: PlayerService.submitGuestRoster(matchId) calls the new RPC
+- Added: Match model guestRosterSubmitted field; included in fromMap/copyWith
+- Changed: "My Team" block checkmark logic — match owner shows when staged; guest shows when they submitted roster
+- Changed: "Opponent" block checkmark logic — match owner sees checkmark when guest submitted; guest sees checkmark when Team A staged
+- Changed: Submit Roster button now calls submitGuestRoster and updates local _guestRosterSubmitted state
+- Changed: _refreshMatchRow fetches guest_roster_submitted for Team A's initial load
+- Changed: Realtime callback updates _guestRosterSubmitted when Team A's row changes
+
+v1.22 03.03.2026 MatchView: guest team can leave a match
+
+- Added: "Leave Match" option in the overflow menu for guest (Team B) match views; styled red with exit_to_app icon
+- Added: Confirmation dialog warns that the match will be removed and a new invite is needed to rejoin
+- Added: PlayerService.leaveMatch(matchId) calls new leave_match SECURITY DEFINER RPC
+- Added: leave_match RPC — validates caller is a coach/owner of the guest team, clears linked_match_id and is_staged on the host row, deletes the guest match row
+- Changed: Leaving the match pops with null so the matches list removes it immediately
+
+v1.22 03.02.2026 MatchView: fix staged checkmark appearing on wrong team for Team B
+
+- Fixed: Team B's match view incorrectly showed the green checkmark on "My Team" (Team B) instead of "Opponent" (Team A) when only Team A had staged
+- Fixed: _isMatchOwner getter was using currentTeamId == _match.teamId, which was always true for Team B since each team's match row uses their own team ID; replaced with !_match.isGuestMatch which correctly identifies non-owners
+
+v1.22 03.02.2026 Fix redeem_match_invite using wrong column name
+
+- Fixed: redeem_match_invite RPC referenced display_name instead of team_name on teams table, causing "column does not exist" error when joining a match by code
+
 v1.22 03.02.2026 MatchView: hide match settings and invite options from guest team
 
 - Added: is_guest_match BOOLEAN column to matches table (default false)
