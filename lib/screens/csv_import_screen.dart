@@ -3,25 +3,32 @@ import 'package:csv/csv.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/services.dart' show rootBundle, Clipboard, ClipboardData;
 import '../models/player.dart';
 import '../services/player_service.dart';
+import '../utils/download_helper.dart';
 
 // =============================================================================
 // csv_import_screen.dart  (AOD v1.22)
 //
-// Allows a coach to populate their team roster by uploading a CSV file.
+// Allows a coach to bulk-import players from a CSV file.
 //
 // Flow:
-//   1. Coach downloads the template CSV (shows required/optional columns).
-//   2. Coach picks a .csv file from their device.
-//   3. App parses the file, validates rows, and shows a preview table.
-//   4. Coach taps "Import" — rows are batch-inserted via PlayerService.
+//   1. Coach downloads the template (real file download on web; mobile shows
+//      path_provider save or clipboard fallback).
+//   2. Coach either picks their own CSV or loads the built-in template as a
+//      starting preview to understand the format.
+//   3. App parses the file, validates rows, shows a preview table.
+//   4. Coach taps "Import N" — rows are batch-inserted via PlayerService.
+//
+// Asset: roster_template.csv (project root, registered in pubspec.yaml)
 //
 // CSV columns (case-insensitive header matching):
 //   Required : first_name, last_name
 //   Optional : jersey_number, position, nickname, athlete_email, guardian_email
 // =============================================================================
+
+const _kTemplatePath = 'roster_template.csv';
 
 class CsvImportScreen extends StatefulWidget {
   final String teamId;
@@ -35,51 +42,65 @@ class CsvImportScreen extends StatefulWidget {
 class _CsvImportScreenState extends State<CsvImportScreen> {
   final _service = PlayerService();
 
-  // Parsed rows ready to preview/import.
   List<_CsvRow> _rows = [];
   String? _fileName;
   bool _importing = false;
   String? _parseError;
 
-  // ── Template ───────────────────────────────────────────────────────────────
+  // ── Template download ──────────────────────────────────────────────────────
 
-  static const _templateCsv =
-      'first_name,last_name,jersey_number,position,nickname,athlete_email,guardian_email\n'
-      'Jane,Smith,10,Forward,,jane@example.com,parent@example.com\n'
-      'Marcus,Jones,5,Guard,MJ,,\n';
+  /// On web: triggers a real browser file download of roster_template.csv.
+  /// On mobile/desktop: copies the template as tab-separated values to the
+  /// clipboard. Excel and Google Sheets both parse TSV from the clipboard
+  /// correctly into separate columns.
+  Future<void> _downloadTemplate() async {
+    final String content;
+    try {
+      content = await rootBundle.loadString(_kTemplatePath);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Template file not found in app bundle.')),
+      );
+      return;
+    }
 
-  void _downloadTemplate() {
     if (kIsWeb) {
-      // On web, encode as a data URI and trigger a browser download.
-      final bytes = utf8.encode(_templateCsv);
-      final b64 = base64Encode(bytes);
-      // Use a hidden anchor click via JS interop.
-      // ignore: undefined_prefixed_name
-      _triggerWebDownload(b64);
+      downloadCsvBytes(utf8.encode(content), 'roster_template.csv');
     } else {
-      // On mobile/desktop, copy to clipboard and notify the user.
-      Clipboard.setData(const ClipboardData(text: _templateCsv));
+      // Convert CSV → TSV so Excel/Sheets pastes into separate columns.
+      final lines = const LineSplitter().convert(content.trim());
+      final tsv = lines.map((l) => l.split(',').join('\t')).join('\n');
+      await Clipboard.setData(ClipboardData(text: tsv));
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Template CSV copied to clipboard — paste into a spreadsheet app.'),
-          duration: Duration(seconds: 4),
+          content: Text(
+            'Template copied — paste into Excel or Google Sheets. '
+            'Columns will appear correctly because it uses tab-separated values.',
+          ),
+          duration: Duration(seconds: 5),
         ),
       );
     }
   }
 
-  // On web: inject a temporary <a> element and click it.
-  void _triggerWebDownload(String b64) {
-    // Using dart:html is not available in non-web builds, so we use a
-    // platform channel / js interop via url_launcher approach:
-    // Since url_launcher isn't a dependency we use Clipboard as fallback.
-    Clipboard.setData(const ClipboardData(text: _templateCsv));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Template copied to clipboard — paste into Excel or Google Sheets and save as CSV.'),
-        duration: Duration(seconds: 5),
-      ),
-    );
+  // ── Preview template ───────────────────────────────────────────────────────
+
+  /// Loads the bundled CSV asset into the preview table without importing it.
+  /// Useful so the user can see the expected format immediately.
+  Future<void> _previewTemplate() async {
+    final String content;
+    try {
+      content = await rootBundle.loadString(_kTemplatePath);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not load template file.')),
+      );
+      return;
+    }
+    _parseCsv(content, 'roster_template.csv (preview only — rows are examples)');
   }
 
   // ── File picking & parsing ─────────────────────────────────────────────────
@@ -96,7 +117,7 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
       result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['csv'],
-        withData: true, // needed for web
+        withData: true,
       );
     } catch (e) {
       setState(() => _parseError = 'Could not open file picker: $e');
@@ -112,8 +133,7 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
       return;
     }
 
-    final content = utf8.decode(bytes, allowMalformed: true);
-    _parseCsv(content, file.name);
+    _parseCsv(utf8.decode(bytes, allowMalformed: true), file.name);
   }
 
   void _parseCsv(String content, String name) {
@@ -124,7 +144,6 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
         return;
       }
 
-      // Normalise header row.
       final header = rows.first
           .map((c) => c.toString().trim().toLowerCase().replaceAll(' ', '_'))
           .toList();
@@ -151,7 +170,7 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
         final r = rows[i];
         final fn = cell(r, fnIdx);
         final ln = cell(r, lnIdx);
-        if (fn == null && ln == null) continue; // skip blank rows
+        if (fn == null && ln == null) continue;
 
         parsed.add(_CsvRow(
           rowNumber: i + 1,
@@ -212,9 +231,12 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
       final count = await _service.bulkAddPlayers(players);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$count player${count == 1 ? '' : 's'} imported successfully.')),
+        SnackBar(
+          content: Text(
+              '$count player${count == 1 ? '' : 's'} imported successfully.'),
+        ),
       );
-      Navigator.pop(context, true); // true → caller should refresh roster
+      Navigator.pop(context, true);
     } catch (e) {
       if (!mounted) return;
       final msg = e.toString().replaceFirst('Exception: ', '');
@@ -250,23 +272,27 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
         title: const Text('Import Roster from CSV'),
         actions: [
           if (hasRows && validCount > 0)
-            FilledButton.icon(
-              onPressed: _importing ? null : _import,
-              icon: _importing
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.upload, size: 18),
-              label: Text('Import $validCount'),
-              style: FilledButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: theme.colorScheme.primary,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilledButton.icon(
+                onPressed: _importing ? null : _import,
+                icon: _importing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.upload, size: 18),
+                label: Text('Import $validCount'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: theme.colorScheme.primary,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                ),
               ),
             ),
-          const SizedBox(width: 8),
         ],
       ),
       body: Padding(
@@ -274,7 +300,7 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Instructions card ──────────────────────────────────────────
+            // ── Instructions card ────────────────────────────────────────
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
@@ -285,14 +311,39 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
                     const SizedBox(height: 8),
                     const Text(
                       '1. Download the template and fill it in.\n'
-                      '2. Save as CSV (.csv) and pick the file below.\n'
+                      '2. Save as .csv, then pick the file below.\n'
                       '3. Review the preview, then tap Import.',
                     ),
                     const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      onPressed: _downloadTemplate,
-                      icon: const Icon(Icons.download, size: 18),
-                      label: const Text('Download Template CSV'),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        // Option 1 — download the actual file
+                        FilledButton.icon(
+                          onPressed: _downloadTemplate,
+                          icon: const Icon(Icons.download, size: 18),
+                          label: Text(
+                            kIsWeb
+                                ? 'Download Template'
+                                : 'Copy Template to Clipboard',
+                          ),
+                        ),
+                        // Option 2 — preview the bundled template in-app
+                        OutlinedButton.icon(
+                          onPressed: _previewTemplate,
+                          icon: const Icon(Icons.table_view, size: 18),
+                          label: const Text('Preview Template'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      kIsWeb
+                          ? 'Or tap "Preview Template" to see the format without downloading.'
+                          : 'On mobile, the template is copied as tab-separated values — paste into Excel or Google Sheets, then export as CSV.',
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: Colors.grey.shade600),
                     ),
                   ],
                 ),
@@ -300,7 +351,7 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
             ),
             const SizedBox(height: 16),
 
-            // ── File picker ────────────────────────────────────────────────
+            // ── File picker ──────────────────────────────────────────────
             Row(
               children: [
                 FilledButton.icon(
@@ -320,7 +371,7 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
               ],
             ),
 
-            // ── Parse error ────────────────────────────────────────────────
+            // ── Parse error ──────────────────────────────────────────────
             if (_parseError != null) ...[
               const SizedBox(height: 12),
               Container(
@@ -331,7 +382,8 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.error_outline, color: theme.colorScheme.error, size: 18),
+                    Icon(Icons.error_outline,
+                        color: theme.colorScheme.error, size: 18),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -344,13 +396,13 @@ class _CsvImportScreenState extends State<CsvImportScreen> {
               ),
             ],
 
-            // ── Summary banner ─────────────────────────────────────────────
+            // ── Summary banner ───────────────────────────────────────────
             if (hasRows) ...[
               const SizedBox(height: 12),
               _SummaryBanner(validCount: validCount, errorCount: errorCount),
             ],
 
-            // ── Preview table ──────────────────────────────────────────────
+            // ── Preview table ────────────────────────────────────────────
             if (hasRows) ...[
               const SizedBox(height: 12),
               Expanded(child: _PreviewTable(rows: _rows)),
@@ -385,7 +437,9 @@ class _SummaryBanner extends StatelessWidget {
       child: Row(
         children: [
           Icon(
-            hasErrors ? Icons.warning_amber_rounded : Icons.check_circle_outline,
+            hasErrors
+                ? Icons.warning_amber_rounded
+                : Icons.check_circle_outline,
             size: 18,
             color: hasErrors ? Colors.orange.shade700 : Colors.green.shade700,
           ),
@@ -458,8 +512,10 @@ class _PreviewTable extends StatelessWidget {
                 DataCell(Text(r.guardianEmail ?? '')),
                 DataCell(
                   isError
-                      ? const Icon(Icons.error_outline, color: Colors.red, size: 18)
-                      : const Icon(Icons.check_circle_outline, color: Colors.green, size: 18),
+                      ? const Icon(Icons.error_outline,
+                          color: Colors.red, size: 18)
+                      : const Icon(Icons.check_circle_outline,
+                          color: Colors.green, size: 18),
                 ),
               ],
             );
@@ -481,7 +537,7 @@ class _CsvRow {
   final String? nickname;
   final String? athleteEmail;
   final String? guardianEmail;
-  final String? error; // non-null means row will be skipped
+  final String? error;
 
   const _CsvRow({
     required this.rowNumber,

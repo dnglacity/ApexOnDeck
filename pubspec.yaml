@@ -39,6 +39,9 @@ flutter:
   # Material Icons font — required for Icons.* throughout the app.
   uses-material-design: true
 
+  assets:
+    - roster_template.csv
+
   # NOTE: flutter_dotenv and the .env asset entry have been removed.
   # The app uses --dart-define-from-file=config.json (see main.dart),
   # not a .env file. Keeping the .env asset caused a build warning when
