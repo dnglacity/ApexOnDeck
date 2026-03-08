@@ -1,0 +1,8 @@
+**How to add templates via Supabase Table Editor:**
+Insert rows into `core_match_format_templates`. `sections` is a JSONB array:
+```json
+[
+  {"title": "Starters", "position_count": 5},
+  {"title": "Bench",    "position_count": 7}
+]
+```

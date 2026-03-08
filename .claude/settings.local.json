@@ -12,7 +12,15 @@
       "WebFetch(domain:github.com)",
       "Bash(curl:*)",
       "Bash(sed:*)",
-      "Bash(flutter pub:*)"
+      "Bash(flutter pub:*)",
+      "Bash(jq:*)",
+      "Bash(grep:*)",
+      "Bash(dd:*)",
+      "Bash(do:*)",
+      "Bash(timeout 5 bash:*)",
+      "Bash(perl:*)",
+      "Bash(xxd:*)",
+      "Bash(\"/c/Users/Derrick/Documents/SweatDex/sweatdex/Supabase_script.md\":*)"
     ]
   }
 }

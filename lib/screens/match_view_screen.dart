@@ -8,6 +8,7 @@ import '../services/player_service.dart';
 import '../utils/ui_helpers.dart';
 import 'game_roster_screen.dart';
 import 'match_format_screen.dart';
+import 'match_live_screen.dart';
 
 // =============================================================================
 // match_view_screen.dart  (AOD v1.22)
@@ -105,19 +106,27 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
   }
 
   /// Fetches the latest match row from DB to pick up linked_match_id / is_staged
-  /// changes that occurred after the match list was last loaded.
+  /// and settings changes that occurred after the match list was last loaded.
   Future<void> _refreshMatchRow() async {
     try {
       final row = await Supabase.instance.client
           .from('matches')
-          .select('is_staged, linked_match_id, guest_roster_submitted')
+          .select('my_team_name, opponent_name, match_date, is_home, notes, is_staged, linked_match_id, guest_roster_submitted')
           .eq('id', _match.id)
           .single();
       if (!mounted) return;
       final linkedId = row['linked_match_id'] as String?;
       setState(() {
-        _match = _match.copyWith(linkedMatchId: linkedId);
-        // Only update is_staged from own row if we are the match owner.
+        _match = _match.copyWith(
+          linkedMatchId: linkedId,
+          myTeamName: row['my_team_name'] as String?,
+          opponentName: row['opponent_name'] as String?,
+          date: row['match_date'] != null
+              ? DateTime.parse(row['match_date'] as String).toLocal()
+              : null,
+          isHome: row['is_home'] as bool?,
+          notes: row['notes'] as String?,
+        );
         if (_isMatchOwner) {
           _isStaged = row['is_staged'] == true;
           _guestRosterSubmitted = row['guest_roster_submitted'] == true;
@@ -194,6 +203,19 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                   }
                   // Clear opponent name if opponent was removed.
                   if (linkedId == null) _linkedTeamName = null;
+                } else {
+                  // Guest: pick up settings changes synced by the host's RPC.
+                  _isStaged = newRow['is_staged'] == true;
+                  _match = _match.copyWith(
+                    myTeamName: newRow['my_team_name'] as String?,
+                    opponentName: newRow['opponent_name'] as String?,
+                    date: newRow['match_date'] != null
+                        ? DateTime.parse(newRow['match_date'] as String)
+                            .toLocal()
+                        : null,
+                    isHome: newRow['is_home'] as bool?,
+                    notes: newRow['notes'] as String?,
+                  );
                 }
               });
             }
@@ -225,6 +247,25 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
             // Team A: Team B just submitted their roster.
             if (mounted && _isMatchOwner) {
               setState(() => _guestRosterSubmitted = true);
+            }
+          },
+        )
+        .onBroadcast(
+          event: 'guest_unsubmitted',
+          callback: (payload) {
+            // Team A: Team B unsent their roster submission.
+            if (mounted && _isMatchOwner) {
+              setState(() => _guestRosterSubmitted = false);
+            }
+          },
+        )
+        .onBroadcast(
+          event: 'match_settings_updated',
+          callback: (payload) {
+            // Team B: Team A edited match settings — refresh from DB as
+            // a backup in case postgres-changes was RLS-blocked.
+            if (mounted && !_isMatchOwner) {
+              _refreshMatchRow();
             }
           },
         )
@@ -543,7 +584,8 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
 
   Widget _buildCoachFab(BuildContext context) {
     if (_isMatchOwner) {
-      return FloatingActionButton.extended(
+      final stageFab = FloatingActionButton.extended(
+        heroTag: 'stage',
         onPressed: _isStaged
             ? () {
                 showDialog(
@@ -616,9 +658,71 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
         backgroundColor: const Color(0xFFF4C430),
         foregroundColor: const Color(0xFF1A3A6B),
       );
+
+      // When both teams are ready, stack "Start Match" above "Staged".
+      if (_isStaged && _guestRosterSubmitted) {
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            FloatingActionButton.extended(
+              heroTag: 'start',
+              onPressed: () => _confirmStartMatch(context),
+              icon: const Icon(Icons.sports),
+              label: const Text('Start Match'),
+              backgroundColor: Colors.green,
+              foregroundColor: Colors.white,
+            ),
+            const SizedBox(height: 12),
+            stageFab,
+          ],
+        );
+      }
+
+      return stageFab;
     }
 
-    // Opposing team coach — roster submission only.
+    // Opposing team coach — roster submission / unsend.
+    if (_guestRosterSubmitted) {
+      return FloatingActionButton.extended(
+        onPressed: () {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Unsend Roster'),
+              content: const Text(
+                'This will withdraw your submitted roster. '
+                'The opposing team will be notified.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    Navigator.of(context).pop();
+                    await PlayerService().unsubmitGuestRoster(_match.id);
+                    if (mounted) {
+                      setState(() => _guestRosterSubmitted = false);
+                      _broadcastChannel?.sendBroadcastMessage(
+                        event: 'guest_unsubmitted',
+                        payload: {},
+                      );
+                    }
+                  },
+                  child: const Text('Unsend'),
+                ),
+              ],
+            ),
+          );
+        },
+        icon: const Icon(Icons.check_circle, color: Colors.green),
+        label: const Text('Roster Submitted'),
+        backgroundColor: const Color(0xFFF4C430),
+        foregroundColor: const Color(0xFF1A3A6B),
+      );
+    }
+
     return FloatingActionButton.extended(
       onPressed: () {
         showDialog(
@@ -655,6 +759,51 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
       label: const Text('Submit Roster'),
       backgroundColor: const Color(0xFFF4C430),
       foregroundColor: const Color(0xFF1A3A6B),
+    );
+  }
+
+  // ── Start Match ──────────────────────────────────────────────────────────
+
+  void _confirmStartMatch(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Start Match'),
+        content: const Text(
+          'Both teams are ready. '
+          'Start the match to view both rosters side by side.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              _openMatchLive();
+            },
+            child: const Text('Start'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openMatchLive() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MatchLiveScreen(
+          match: _match,
+          hostTeamName: _match.myTeamName,
+          opponentTeamName: _linkedTeamName ?? _match.opponentName,
+          hostStarters: _rosterStarters,
+          hostSubs: _rosterSubs,
+          hostFormat: _rosterFormat,
+          hostFormatSlots: _formatSlots,
+        ),
+      ),
     );
   }
 
@@ -1151,7 +1300,7 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                                 if (!formKey.currentState!.validate()) return;
                                 setSheetState(() => isSaving = true);
                                 try {
-                                  await PlayerService().updateMatch(
+                                  await PlayerService().updateMatchSettings(
                                     matchId: _match.id,
                                     opponentName: opponentCtrl.text.trim(),
                                     myTeamName: myTeamCtrl.text.trim(),
@@ -1167,7 +1316,14 @@ class _MatchViewScreenState extends State<MatchViewScreen> {
                                     notes: notesCtrl.text.trim(),
                                   );
                                   if (ctx.mounted) Navigator.pop(ctx);
-                                  if (mounted) setState(() => _match = updated);
+                                  if (mounted) {
+                                    setState(() => _match = updated);
+                                    // Notify the guest in real time.
+                                    _broadcastChannel?.sendBroadcastMessage(
+                                      event: 'match_settings_updated',
+                                      payload: {},
+                                    );
+                                  }
                                 } catch (e) {
                                   setSheetState(() => isSaving = false);
                                   if (ctx.mounted) {
